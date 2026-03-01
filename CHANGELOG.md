@@ -1,44 +1,56 @@
-# Changelog
-
-All notable changes to PyDisplay will be documented here.
+# PyDisplay — Changelog
 
 ---
 
-## [1.0.0] - 2026-03-01
+## v1.0.3 — 2026-03-01
 
-### Initial Release
+### Added
+- **Version number in main title bar** — "PyDisplay - v1.0.3" now appears in the top-right corner of the main overlay; auto-updates with `_APP_VERSION`
+- **Version number on Dependency Setup page** — `v1.0.3` now appears beside the **PyDisplay** label in the top-right of the dependency setup header; auto-updates with `_APP_VERSION`
+- **HELP? Quick Reference updated** — the Help popup now documents all tools added in v1.0.2 and v1.0.3:
+  - Memory section updated to mention the Memory Cleaner
+  - New **Memory Tools** section listing `▶ TOOLS`, `🧹 MEMORY CLEAN`, `Safe Clean`, and `Aggressive Clean` with descriptions
+  - Theme Picker section now explains that the **Dropdown Tools** colour swatch controls all tool buttons across both Network and Memory dropdowns simultaneously
 
-#### Core Features
-- Real-time GPU, CPU, RAM, network, and disk monitoring via always-on-top overlay
-- Click-through mode with adjustable opacity
-- Drag-to-reposition with persistent position saving across sessions
-- Minimize to system tray with live GPU percentage rendered into the tray icon
-- Full theme support — built-in themes plus custom theme creation and validation
-- Config versioning to handle settings migrations cleanly
+### Changed
+- Version font on Dependency Setup page set to `BASE_FONT_SIZE - 1` (1px larger than initial implementation)
+- App version bumped to `1.0.3`
 
-#### Code & Architecture
-- Single-file `.pyw` — no installer, no bloat
-- `_BASE_FONT_SIZE` constant introduced for consistent font scaling across the app
-- `_open_settings` refactored from ~772 lines into 11 focused helper methods
-- `_build` refactored from ~510 lines into 7 focused helper methods
-- Theme validation with safe fallback defaults on load
-- Startup opacity bug fixed — `wm_attributes("-alpha")` now guarded to prevent invisible window on launch
-- All error paths routed through `_log_error()` helper for consistent logging
-- Dead imports removed (`ctypes.wintypes`)
-- Popup z-order system implemented to prevent popups rendering behind the main window
-- `_ALL_POPUP_ATTRS` promoted to class-level constant (previously rebuilt every 50ms)
-- Tooltip attributes moved fully to instance scope
+---
 
-#### Dependency Checker
-- Built-in dependency checker window on launch with one-click installs
-- "Check for Updates" button to check for outdated Python packages
-- "Check for App Update" button — hits the GitHub Releases API and reports whether a newer version of PyDisplay is available
-- Both update buttons right-aligned and styled consistently in the dep window
-- Update status messages display inline in the dep window header row
-- Inline `tkinter.messagebox` import in crash handler kept as intentional lazy load
+## v1.0.2 — 2026-03-01
 
-#### Project
-- `README.md` with feature overview, requirements, and usage instructions
-- `requirements.txt` with core and optional dependencies annotated
-- `.gitignore` excluding runtime data files and cache
-- `_APP_VERSION` and `_GITHUB_REPO` constants at the top of the file for easy version bumping on future releases
+### Added
+- **Memory Cleaner** — fully integrated Windows memory cleaning tool, accessible via a new `▶ TOOLS` dropdown under the `▸ MEMORY` section, matching the look and behaviour of the Network Tools dropdown
+  - **Safe Clean** — trims process working sets, flushes the modified page list, clears file system & registry caches; safe for gaming and browsers
+  - **Aggressive Clean** — all Safe steps plus standby list purge and memory page combination (may cause a brief stutter)
+  - Popout window with mode selector (Safe / Aggressive), live step-by-step output log, progress feedback, and before/after RAM usage display
+  - Output auto-formats large values: e.g. `1.2 GB freed` instead of raw MB
+  - Run / Re-run button with animated spinner while cleaning is in progress
+  - Covers all operations from **Memory Reduct v3.5.2** by henrypp (working set trim, modified page flush, file system cache, registry cache, standby list, memory combining, low-memory notification, heap compaction)
+  - Privileges (SeDebugPrivilege, SeIncreaseQuotaPrivilege, etc.) requested automatically; failures reported gracefully without crashing
+
+- **Unified Dropdown Tool Button Colour** — all tool buttons across every dropdown (Network and Memory) now share a single colour controlled by one **Dropdown Tools** swatch in the Theme Picker; changing it applies to all tabs at once
+
+- **Memory Tools dropdown** — styled identically to the Network Tools dropdown: same popout behaviour, same hover/active colours, same layout
+
+### Changed
+- Memory section description updated internally to reflect new tooling
+- App version bumped to `1.0.2`
+
+### Fixed
+- `HeapCompact` overflow error on 64-bit heap handles — handle array now uses `ctypes.c_void_p` to prevent `int too long to convert` crash
+- Memory Tools dropdown geometry manager conflict resolved (`pack` vs `grid` mismatch that caused startup crash)
+- Re-run on Memory Cleaner now correctly re-executes the full clean cycle rather than returning instantly
+
+---
+
+## v1.0.1 — Initial tracked release
+
+- Core overlay: GPU, CPU, Memory, Network, Disk, Storage sections
+- Network Tools: Speed Test, IP Lookup
+- Theme Picker with named theme save/load
+- Settings: always-on-top, click-through, lock position, tray mode, poll rate, log interval, temp unit, section visibility & order, export/import
+- CSV session logging
+- Auto-update check against GitHub latest tag
+- Custom title bar, drag/resize, tooltip system
