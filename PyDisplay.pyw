@@ -2115,12 +2115,17 @@ def _reopen_picker_flagged():
 
 def _save_reopen_picker(enabled):
     """Write reopen_picker flag into pos.json without overwriting other keys."""
-    cfg = _read_config()
-    if enabled:
-        cfg["reopen_picker"] = True
-    else:
-        cfg.pop("reopen_picker", None)
-    _write_config(cfg)
+    try:
+        os.makedirs(_APP_DIR, exist_ok=True)
+        cfg = _read_config()
+        if enabled:
+            cfg["reopen_picker"] = True
+        else:
+            cfg.pop("reopen_picker", None)
+        with open(_CFG_PATH, "w") as _f:
+            json.dump(cfg, _f, indent=2)
+    except Exception as e:
+        _log_error("_save_reopen_picker", e)
 
 
 # ── Singleton check — prevent multiple instances ──────────────────────────────
@@ -7956,13 +7961,28 @@ if __name__ == "__main__":
                             font=(_FONT, _BASE_FONT_SIZE, "bold"), height=1)
 
         def _pick(fx, fy):
-            AW, AH = 320, 600
+            # Use saved overlay size if available, else fall back to defaults
+            _cfg_aw, _cfg_ah = 320, 600
+            try:
+                with open(_CFG_PATH) as _cf:
+                    _saved = json.load(_cf)
+                    _cfg_aw = _saved.get("w", _cfg_aw)
+                    _cfg_ah = _saved.get("h", _cfg_ah)
+            except Exception:
+                pass
+            AW = max(100, _cfg_aw)
+            AH = max(100, _cfg_ah)
             _mx3 = _active_mon["x"]; _my3 = _active_mon["y"]
             _mw3 = _active_mon["w"]; _mh3 = _active_mon["h"]
-            x = _mx3 + max(10, min(int(fx * (_mw3 - AW - 20)), _mw3 - AW - 10))
-            y = _my3 + max(10, min(int(fy * (_mh3 - AH - 60)), _mh3 - AH - 10))
-            _chosen["x"] = x
-            _chosen["y"] = y
+            # Scale margin proportionally to monitor resolution (min 8px, max 20px)
+            MARGIN = max(8, min(20, int(_mw3 / 192)))
+            # Calculate position relative to monitor, clamp within it, then add monitor offset
+            rel_x = int(fx * (_mw3 - AW))
+            rel_y = int(fy * (_mh3 - AH))
+            rel_x = max(MARGIN, min(rel_x, _mw3 - AW - MARGIN))
+            rel_y = max(MARGIN, min(rel_y, _mh3 - AH - MARGIN))
+            _chosen["x"] = _mx3 + rel_x
+            _chosen["y"] = _my3 + rel_y
             root.destroy()
 
         zone_frame = tk.Frame(root, bg=PANEL)
@@ -8038,9 +8058,12 @@ if __name__ == "__main__":
         root.geometry(f"+{sw//2 - pw//2}+{sh//2 - ph//2}")
         root.mainloop()
 
-        # Write chosen position to pos.json, merging any existing keys
+        # Clear the one-shot reopen flag now that picker has been shown
+        _save_reopen_picker(False)
+
+        # Write chosen position to pos.json, merging any existing keys (preserve w/h)
         if _chosen:
-            _write_config({"x": _chosen["x"], "y": _chosen["y"], "w": 320, "h": 600})
+            _write_config({"x": _chosen["x"], "y": _chosen["y"]})
 
     try:
         app = App()
