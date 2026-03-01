@@ -29,7 +29,9 @@ _DEFAULT_THEME_PATH = os.path.join(_APP_DIR, "PyDisplay_theme_Default.json")
 _THEME_DIR  = _APP_DIR   # themes live alongside the config
 _FONT           = "Courier New" # single source of truth for the app font
 _BASE_FONT_SIZE = 9             # default font size; all remap logic is relative to this
-_CONFIG_VERSION = 1             # increment when config schema changes; triggers migration
+_CONFIG_VERSION  = 1             # increment when config schema changes; triggers migration
+_APP_VERSION     = "1.0.3"       # increment on each release; checked against GitHub latest tag
+_GITHUB_REPO     = "reaprrr/PyDisplay"
 
 # Default display section order — defined once, referenced everywhere
 _DEFAULT_SECTION_ORDER = ["gpu", "cpu", "mem", "net", "disk", "storage"]
@@ -46,6 +48,186 @@ _WS_EX_TOOLWINDOW  = 0x80
 _WS_EX_APPWINDOW   = 0x40000
 _LWA_ALPHA      = 0x2
 _user32         = ctypes.windll.user32
+
+
+# ── Memory Cleaner — Win32 constants & helpers ────────────────────────────────
+
+_MC_TOKEN_ADJUST_PRIVILEGES  = 0x0020
+_MC_TOKEN_QUERY              = 0x0008
+_MC_SE_PRIVILEGE_ENABLED     = 0x00000002
+_MC_PROCESS_QUERY_INFO       = 0x0400
+_MC_PROCESS_SET_QUOTA        = 0x0100
+_MC_SystemFileCacheInfo      = 0x15
+_MC_SystemMemListInfo        = 0x50
+_MC_SystemCombinePhysMem     = 0x82
+_MC_SystemRegistryRecon      = 0x9E
+_MC_MemEmptyWorkingSet       = 2
+_MC_MemFlushModified         = 3
+_MC_MemPurgeStandby          = 4
+_MC_MemPurgeLowStandby       = 5
+
+class _MC_LUID(ctypes.Structure):
+    _fields_ = [("LowPart", ctypes.c_ulong), ("HighPart", ctypes.c_long)]
+
+class _MC_LUID_ATTR(ctypes.Structure):
+    _fields_ = [("Luid", _MC_LUID), ("Attributes", ctypes.c_ulong)]
+
+class _MC_TOKEN_PRIVS(ctypes.Structure):
+    _fields_ = [("PrivilegeCount", ctypes.c_ulong), ("Privileges", _MC_LUID_ATTR * 1)]
+
+class _MC_FILECACHE_INFO(ctypes.Structure):
+    _fields_ = [("CurrentSize", ctypes.c_size_t), ("PeakSize", ctypes.c_size_t),
+                ("PageFaultCount", ctypes.c_ulong), ("MinimumWorkingSet", ctypes.c_size_t),
+                ("MaximumWorkingSet", ctypes.c_size_t), ("Flags", ctypes.c_ulong)]
+
+class _MC_COMBINE_INFO(ctypes.Structure):
+    _fields_ = [("Handle", ctypes.c_void_p), ("PagesCombined", ctypes.c_ulonglong),
+                ("Flags", ctypes.c_ulong)]
+
+def _mc_enable_privilege(name):
+    advapi32 = ctypes.windll.advapi32
+    kernel32  = ctypes.windll.kernel32
+    advapi32.OpenProcessToken.argtypes      = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.OpenProcessToken.restype       = ctypes.c_int
+    advapi32.LookupPrivilegeValueW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.POINTER(_MC_LUID)]
+    advapi32.LookupPrivilegeValueW.restype  = ctypes.c_int
+    advapi32.AdjustTokenPrivileges.restype  = ctypes.c_int
+    h = ctypes.c_void_p()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(),
+                                     _MC_TOKEN_ADJUST_PRIVILEGES | _MC_TOKEN_QUERY,
+                                     ctypes.byref(h)):
+        return False
+    luid = _MC_LUID()
+    if not advapi32.LookupPrivilegeValueW(None, name, ctypes.byref(luid)):
+        kernel32.CloseHandle(h); return False
+    tp = _MC_TOKEN_PRIVS()
+    tp.PrivilegeCount = 1; tp.Privileges[0].Luid = luid
+    tp.Privileges[0].Attributes = _MC_SE_PRIVILEGE_ENABLED
+    advapi32.AdjustTokenPrivileges(h, False, ctypes.byref(tp), ctypes.sizeof(tp), None, None)
+    ok = kernel32.GetLastError() == 0
+    kernel32.CloseHandle(h)
+    return ok
+
+def _mc_set_mem_list(cmd_val):
+    cmd = ctypes.c_int(cmd_val)
+    return ctypes.windll.ntdll.NtSetSystemInformation(
+        _MC_SystemMemListInfo, ctypes.byref(cmd), ctypes.sizeof(cmd)) == 0
+
+def _mc_get_ram_mb():
+    """Return (total_mb, used_mb, free_mb)."""
+    class _MEMSTATUS(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtVirtual", ctypes.c_ulonglong)]
+    ms = _MEMSTATUS(); ms.dwLength = ctypes.sizeof(ms)
+    ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms))
+    total = ms.ullTotalPhys / (1024**2)
+    free  = ms.ullAvailPhys / (1024**2)
+    return total, total - free, free
+
+def _mc_run(aggressive=False, log_cb=None):
+    """
+    Run the full memory cleaning sequence in a background thread.
+    log_cb(msg) is called with status lines for the UI to display.
+    Returns MB freed (float).
+    """
+    def _log(msg):
+        if log_cb: log_cb(msg)
+
+    ntdll    = ctypes.windll.ntdll
+    kernel32 = ctypes.windll.kernel32
+    psapi    = ctypes.windll.psapi
+
+    _, used_before, _ = _mc_get_ram_mb()
+
+    # 1. Privileges
+    for priv in ("SeDebugPrivilege", "SeIncreaseQuotaPrivilege",
+                 "SeMaintainVolumePrivilege", "SeProfileSingleProcessPrivilege"):
+        _mc_enable_privilege(priv)
+
+    # 2. Flush process working sets
+    _log("Flushing process working sets…")
+    pid_arr  = (ctypes.c_ulong * 8192)()
+    bytes_ret = ctypes.c_ulong()
+    psapi.EnumProcesses(ctypes.byref(pid_arr), ctypes.sizeof(pid_arr), ctypes.byref(bytes_ret))
+    n_pids = bytes_ret.value // ctypes.sizeof(ctypes.c_ulong)
+    ok = 0
+    for i in range(n_pids):
+        pid = pid_arr[i]
+        if not pid: continue
+        h = kernel32.OpenProcess(_MC_PROCESS_QUERY_INFO | _MC_PROCESS_SET_QUOTA, False, pid)
+        if h:
+            psapi.EmptyWorkingSet(h)
+            kernel32.SetProcessWorkingSetSizeEx(h, ctypes.c_size_t(-1), ctypes.c_size_t(-1), 0)
+            kernel32.CloseHandle(h); ok += 1
+    _log(f"  Trimmed {ok} processes")
+
+    # 3. System working set
+    _log("Flushing system working set…")
+    _mc_set_mem_list(_MC_MemEmptyWorkingSet)
+
+    # 4. Modified page list
+    _log("Flushing modified page list…")
+    _mc_set_mem_list(_MC_MemFlushModified)
+
+    # 5. File cache
+    _log("Clearing file system cache…")
+    info    = _MC_FILECACHE_INFO()
+    ret_len = ctypes.c_ulong(0)
+    st = ntdll.NtQuerySystemInformation(_MC_SystemFileCacheInfo, ctypes.byref(info),
+                                         ctypes.sizeof(info), ctypes.byref(ret_len))
+    if st == 0:
+        info.MinimumWorkingSet = ctypes.c_size_t(-1).value
+        info.MaximumWorkingSet = ctypes.c_size_t(-1).value
+        ntdll.NtSetSystemInformation(_MC_SystemFileCacheInfo, ctypes.byref(info), ctypes.sizeof(info))
+
+    # 6. Registry cache
+    _log("Flushing registry cache…")
+    ntdll.NtSetSystemInformation(_MC_SystemRegistryRecon, None, 0)
+
+    # 7. Combine duplicate pages
+    _log("Combining duplicate memory pages…")
+    ci = _MC_COMBINE_INFO()
+    st = ntdll.NtSetSystemInformation(_MC_SystemCombinePhysMem, ctypes.byref(ci), ctypes.sizeof(ci))
+    if st == 0 and ci.PagesCombined:
+        _log(f"  Combined {ci.PagesCombined:,} pages ({ci.PagesCombined*4//1024} MB)")
+
+    # 8. Low-memory notification
+    _log("Signalling low-memory event…")
+    cmd = ctypes.c_int(1)
+    ntdll.NtSetSystemInformation(0x4A, ctypes.byref(cmd), ctypes.sizeof(cmd))
+
+    # 9. Heap compact
+    _log("Compacting heaps…")
+    kernel32.HeapCompact.restype  = ctypes.c_size_t
+    kernel32.HeapCompact.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    heap_arr = (ctypes.c_void_p * 64)()
+    n = kernel32.GetProcessHeaps(64, ctypes.byref(heap_arr))
+    for i in range(min(n, 64)):
+        if heap_arr[i]: kernel32.HeapCompact(heap_arr[i], 0)
+
+    # 10. DNS cache
+    _log("Flushing DNS cache…")
+    try: ctypes.windll.dnsapi.DnsFlushResolverCache()
+    except Exception: pass
+
+    # 11. Clipboard
+    _log("Clearing clipboard…")
+    u32 = ctypes.windll.user32
+    if u32.OpenClipboard(None): u32.EmptyClipboard(); u32.CloseClipboard()
+
+    # 12+13. Aggressive: standby lists
+    if aggressive:
+        _log("Purging low-priority standby list…")
+        _mc_set_mem_list(_MC_MemPurgeLowStandby)
+        _log("Purging full standby list…")
+        _mc_set_mem_list(_MC_MemPurgeStandby)
+
+    _, used_after, _ = _mc_get_ram_mb()
+    freed = used_before - used_after
+    return freed
 
 
 # ── Config helpers ────────────────────────────────────────────────────────────
@@ -256,8 +438,12 @@ def _run_dependency_check():
     # ── Header ────────────────────────────────────────────────────────────────
     hdr_frame = tk.Frame(root, bg=BG)
     hdr_frame.pack(fill="x", padx=16, pady=(12, 0))
-    tk.Label(hdr_frame, text="PyDisplay", bg=BG, fg=ACCENT,
-             font=(_FONT, _BASE_FONT_SIZE, "bold")).pack(side="right")
+    _ver_frame = tk.Frame(hdr_frame, bg=BG)
+    _ver_frame.pack(side="right")
+    tk.Label(_ver_frame, text="PyDisplay", bg=BG, fg=ACCENT,
+             font=(_FONT, _BASE_FONT_SIZE, "bold")).pack(side="left")
+    tk.Label(_ver_frame, text=f"  v{_APP_VERSION}", bg=BG, fg=SUBTEXT,
+             font=(_FONT, _BASE_FONT_SIZE - 1)).pack(side="left")
     tk.Label(hdr_frame, text="  ·  dependency setup", bg=BG, fg=TEXT,
              font=(_FONT, _BASE_FONT_SIZE, "bold")).pack(side="left")
     tk.Frame(root, bg=BORDER, height=1).pack(fill="x", padx=12, pady=(8, 0))
@@ -632,17 +818,217 @@ def _run_dependency_check():
              bg=BG, fg=TEXT, font=(_FONT, _BASE_FONT_SIZE + 1),
              anchor="w").pack(side="left")
 
-    _upd_btn = tk.Label(legend_row, text="↻  Check for Updates",
+    _upd_status_var = tk.StringVar(value="")
+    tk.Label(legend_row, textvariable=_upd_status_var, bg=BG, fg=ACCENT,
+             font=(_FONT, _BASE_FONT_SIZE), anchor="e").pack(side="right", fill="x", expand=True)
+
+    def _reset_app_upd_btn():
+        _app_upd_btn.config(text="↻  Check for App Update", fg=ACCENT, cursor="hand2")
+        _app_upd_btn.bind("<Button-1>", lambda e: _check_app_update())
+        _app_upd_btn.bind("<Enter>",    lambda e: _app_upd_btn.config(fg=GREEN))
+        _app_upd_btn.bind("<Leave>",    lambda e: _app_upd_btn.config(fg=ACCENT))
+
+    def _check_app_update():
+        """Query GitHub releases API to check if a newer version of PyDisplay is available."""
+        _app_upd_btn.config(text="↻  Checking…", fg=SUBTEXT, cursor="arrow")
+        _app_upd_btn.unbind("<Button-1>")
+        _app_upd_btn.unbind("<Enter>")
+        _app_upd_btn.unbind("<Leave>")
+
+        def _worker():
+            try:
+                url = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
+                req = urllib.request.Request(url, headers={"User-Agent": "PyDisplay"})
+                try:
+                    with urllib.request.urlopen(req, timeout=8) as _r:
+                        data = json.loads(_r.read())
+                except urllib.error.HTTPError as _he:
+                    if _he.code == 404:
+                        def _no_release():
+                            _reset_app_upd_btn()
+                            _upd_status_var.set("ℹ  No releases published yet on GitHub.")
+                        root.after(0, _no_release)
+                        return
+                    raise
+                latest_tag = data.get("tag_name", "").lstrip("v")
+                html_url   = data.get("html_url", f"https://github.com/{_GITHUB_REPO}/releases")
+
+                def _show():
+                    _reset_app_upd_btn()
+                    if not latest_tag:
+                        _upd_status_var.set("✘  Could not read latest release tag.")
+                        return
+                    if latest_tag == _APP_VERSION:
+                        _upd_status_var.set(f"✔  PyDisplay is up to date (v{_APP_VERSION}).")
+                    else:
+                        _upd_status_var.set(f"↑  Update available: v{latest_tag}  (you have v{_APP_VERSION})")
+                        _show_app_update_dialog(latest_tag, html_url)
+                root.after(0, _show)
+            except Exception as exc:
+                def _err():
+                    _reset_app_upd_btn()
+                    _upd_status_var.set(f"✘  App update check failed: {exc}")
+                root.after(0, _err)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_app_update_dialog(latest_tag, html_url):
+        """Confirm update, then download, replace, and restart automatically."""
+        dlg = tk.Toplevel(root)
+        dlg.title("PyDisplay — Update Available")
+        dlg.configure(bg=BG)
+        dlg.resizable(False, False)
+        dlg.wm_attributes("-topmost", True)
+        dlg.overrideredirect(True)
+        dlg.withdraw()
+
+        _make_titlebar(dlg, PANEL, BORDER, SUBTEXT, RED, on_close=dlg.destroy)
+
+        tk.Label(dlg, text="↑  PyDisplay Update Available",
+                 bg=BG, fg="#ff6b35", font=(_FONT, _BASE_FONT_SIZE, "bold"),
+                 padx=16, pady=12).pack(fill="x")
+        tk.Frame(dlg, bg=BORDER, height=1).pack(fill="x", padx=10)
+
+        _status_var = tk.StringVar(value=(
+            f"A new version of PyDisplay is available.\n\n"
+            f"  Current:  v{_APP_VERSION}\n"
+            f"  Latest:    v{latest_tag}\n\n"
+            f"Click Update to download and restart automatically."
+        ))
+        _status_lbl = tk.Label(dlg, textvariable=_status_var,
+                               bg=BG, fg=TEXT, font=(_FONT, _BASE_FONT_SIZE),
+                               justify="left", padx=20, pady=12)
+        _status_lbl.pack(fill="x")
+        tk.Frame(dlg, bg=BORDER, height=1).pack(fill="x", padx=10)
+
+        act = tk.Frame(dlg, bg=BG)
+        act.pack(fill="x", padx=16, pady=10)
+
+        def _do_update():
+            """Download the .pyw from the release assets, replace this file, restart."""
+            update_btn.config(text="Downloading…", fg=SUBTEXT, cursor="arrow")
+            update_btn.unbind("<Button-1>")
+            update_btn.unbind("<Enter>")
+            update_btn.unbind("<Leave>")
+            skip_btn.config(cursor="arrow")
+            skip_btn.unbind("<Button-1>")
+
+            def _worker():
+                try:
+                    # Fetch release assets to find the .pyw file
+                    api_url = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
+                    req = urllib.request.Request(api_url, headers={"User-Agent": "PyDisplay"})
+                    with urllib.request.urlopen(req, timeout=10) as _r:
+                        release_data = json.loads(_r.read())
+
+                    asset_url = None
+                    for asset in release_data.get("assets", []):
+                        if asset["name"].endswith(".pyw"):
+                            asset_url = asset["browser_download_url"]
+                            break
+
+                    if not asset_url:
+                        # Fall back to raw file from the repo tag
+                        asset_url = (
+                            f"https://raw.githubusercontent.com/{_GITHUB_REPO}"
+                            f"/v{latest_tag}/PyDisplay.pyw"
+                        )
+
+                    def _show_downloading():
+                        _status_var.set(
+                            f"Downloading v{latest_tag}…\nPlease wait."
+                        )
+                    root.after(0, _show_downloading)
+
+                    req2 = urllib.request.Request(asset_url, headers={"User-Agent": "PyDisplay"})
+                    with urllib.request.urlopen(req2, timeout=30) as _r2:
+                        new_code = _r2.read()
+
+                    # Write to a temp file first, then replace
+                    this_file  = os.path.abspath(sys.argv[0])
+                    backup     = this_file + ".bak"
+                    tmp        = this_file + ".tmp"
+
+                    with open(tmp, "wb") as _f:
+                        _f.write(new_code)
+
+                    # Backup current file then replace
+                    if os.path.exists(backup):
+                        os.remove(backup)
+                    os.rename(this_file, backup)
+                    os.rename(tmp, this_file)
+
+                    def _restart():
+                        _status_var.set(
+                            f"✔  Updated to v{latest_tag}!\nRestarting PyDisplay…"
+                        )
+                        dlg.update_idletasks()
+                        dlg.after(1200, lambda: (
+                            subprocess.Popen([sys.executable, this_file]),
+                            root.destroy()
+                        ))
+                    root.after(0, _restart)
+
+                except Exception as exc:
+                    def _fail():
+                        _status_var.set(f"✘  Update failed:\n{exc}\n\nYou can update manually from GitHub.")
+                        update_btn.config(text="↑  Update", fg="#ff6b35", cursor="hand2")
+                        update_btn.bind("<Button-1>", lambda e: _do_update())
+                        update_btn.bind("<Enter>",    lambda e: update_btn.config(fg=GREEN))
+                        update_btn.bind("<Leave>",    lambda e: update_btn.config(fg="#ff6b35"))
+                    root.after(0, _fail)
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        update_btn = tk.Label(act, text="↑  Update & Restart",
+                              bg=BORDER, fg="#ff6b35",
+                              font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2",
+                              padx=12, pady=6)
+        update_btn.pack(side="right", padx=(8, 0))
+        update_btn.bind("<Button-1>", lambda e: _do_update())
+        update_btn.bind("<Enter>",    lambda e: update_btn.config(fg=GREEN))
+        update_btn.bind("<Leave>",    lambda e: update_btn.config(fg="#ff6b35"))
+
+        skip_btn = tk.Label(act, text="Skip",
+                            bg=BORDER, fg=SUBTEXT,
+                            font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2",
+                            padx=12, pady=6)
+        skip_btn.pack(side="right")
+        skip_btn.bind("<Button-1>", lambda e: dlg.destroy())
+        skip_btn.bind("<Enter>",    lambda e: skip_btn.config(fg=TEXT))
+        skip_btn.bind("<Leave>",    lambda e: skip_btn.config(fg=SUBTEXT))
+
+        dlg.update_idletasks()
+        _rx = root.winfo_rootx() + root.winfo_width()  // 2 - dlg.winfo_reqwidth()  // 2
+        _ry = root.winfo_rooty() + root.winfo_height() // 2 - dlg.winfo_reqheight() // 2
+        dlg.geometry(f"+{_rx}+{_ry}")
+        dlg.deiconify()
+        dlg.grab_set()
+
+    # ── Update buttons row ────────────────────────────────────────────────────
+    tk.Frame(root, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(6, 0))
+    upd_row = tk.Frame(root, bg=BG)
+    upd_row.pack(fill="x", padx=16, pady=(6, 0))
+
+    tk.Label(upd_row, text="", bg=BG).pack(side="left", fill="x", expand=True)
+
+    _app_upd_btn = tk.Label(upd_row, text="↻  Check for App Update",
+                            bg=BORDER, fg=ACCENT,
+                            font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2",
+                            width=20, padx=12, pady=6)
+    _app_upd_btn.pack(side="right")
+    _reset_app_upd_btn()  # re-bind now that widget exists
+
+    _upd_btn = tk.Label(upd_row, text="↻  Check for Updates",
                         bg=BORDER, fg=ACCENT,
                         font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2",
-                        padx=10, pady=4)
-    _upd_btn.pack(side="right")
+                        width=20, padx=12, pady=6)
+    _upd_btn.pack(side="right", padx=(0, 6))
 
     def _check_updates():
-        """Query PyPI for newer versions of all installed packages."""
         _installed_pkgs = [(rd["disp"], rd["pip_name"]) for rd in row_data if rd["inst_ref"][0]]
         if not _installed_pkgs:
-            log_var.set("No installed packages to check.")
+            _upd_status_var.set("No installed packages to check.")
             return
 
         _upd_btn.config(text="↻  Checking…", fg=SUBTEXT, cursor="arrow")
@@ -671,7 +1057,7 @@ def _run_dependency_check():
             def _show_result():
                 _reset_upd_btn()
                 if not updates:
-                    log_var.set("✔  All packages are up to date.")
+                    _upd_status_var.set("✔  All packages are up to date.")
                     return
                 _show_update_dialog(updates)
 
@@ -869,13 +1255,13 @@ def _run_dependency_check():
     _install_all_btn = tk.Label(log_row, text="\u2b07  Install All",
                                 bg=BORDER, fg=ACCENT,
                                 font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2",
-                                padx=12, pady=6)
+                                width=20, padx=12, pady=6)
     _install_all_btn.pack(side="right")
 
     _dup_btn = tk.Label(log_row, text="Check for Duplicates",
                         bg=BORDER, fg=TEXT,
                         font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2",
-                        padx=12, pady=6)
+                        width=20, padx=12, pady=6)
     _dup_btn.pack(side="right", padx=(0, 6))
     _dup_btn.bind("<Button-1>", lambda e: _check_duplicates())
     _dup_btn.bind("<Enter>",    lambda e: _dup_btn.config(fg=YELLOW))
@@ -910,7 +1296,10 @@ def _run_dependency_check():
                 rd["action_btn"].event_generate("<Button-1>")
 
     def _poll_install_state():
-        """Poll every 300 ms and keep the button label in sync with install state."""
+        """Poll every 300 ms and keep the button label in sync with install state.
+        Stops automatically when the dep-check window is destroyed."""
+        if not root.winfo_exists():
+            return
         _update_install_all_btn()
         root.after(300, _poll_install_state)
 
@@ -2302,6 +2691,7 @@ class App(tk.Tk):
     _ALL_POPUP_ATTRS = (
         "_iplookup_popup", "_speedtest_popup", "_ttguide_popup",
         "_color_popup", "_settings_popup",
+        "_mem_safe_popup", "_mem_aggr_popup",
     )
 
     def __init__(self):
@@ -2328,6 +2718,8 @@ class App(tk.Tk):
         self._speedtest_popup    = None
         self._iplookup_popup     = None
         self._ttguide_popup      = None
+        self._mem_safe_popup     = None
+        self._mem_aggr_popup     = None
         self._hwnd               = None
         self._outer              = None
         self._resize_top_btns    = None
@@ -2340,6 +2732,7 @@ class App(tk.Tk):
         self._last_disk_usage_applied = None
         self._speedtest_running = False
         self._speedtest_cancelled = False
+        self._fetch_running = False       # guard: prevents thread pile-up on slow polls
         self._freq_min_seen = float('inf')
         self._freq_max_seen = 0.0
         self._gpu_device_index = 0
@@ -2358,8 +2751,7 @@ class App(tk.Tk):
         self._color_net       = "#7b30d1"
         self._color_disk      = "#8c4600"
         self._color_storage   = "#c0c0c0"
-        self._color_speedtest = "#8080ff"
-        self._color_iplookup  = "#8080ff"
+        self._color_tools = "#8080ff"
         self._font_size        = _BASE_FONT_SIZE
         self._datetime_format  = ""     # "" = off, "time", "date", "both"
         self._datetime_position = "bottom"  # "bottom" or "top"
@@ -2380,6 +2772,7 @@ class App(tk.Tk):
         self._hidden_sections   = set()   # sections hidden via Settings
         self._section_order     = _DEFAULT_SECTION_ORDER
         self._layout_mode       = "vertical"  # "vertical" or "horizontal"
+        self._font_originals_prune_counter = 0  # prune dead widget refs every N polls
         self._active_theme_path = _DEFAULT_THEME_PATH
         # Only create Default theme file if it doesn't already exist
         if not os.path.exists(self._active_theme_path):
@@ -2395,8 +2788,7 @@ class App(tk.Tk):
                         "net":       "#7b30d1",
                         "disk":      "#8c4600",
                         "storage":   "#c0c0c0",
-                        "speedtest": "#8080ff",
-                        "iplookup":  "#8080ff",
+                        "tools": "#8080ff",
                         "font_size": _BASE_FONT_SIZE,
                         "datetime_format":   "",
                         "datetime_position": "bottom",
@@ -2882,7 +3274,7 @@ class App(tk.Tk):
             TEXT=t["TEXT"]; SUBTEXT=t["SUBTEXT"]; DIM=t["DIM"]
             self._color_gpu=t["gpu"]; self._color_cpu=t["cpu"]; self._color_mem=t["mem"]
             self._color_net=t["net"]; self._color_disk=t["disk"]; self._color_storage=t["storage"]
-            self._color_speedtest=t["speedtest"]; self._color_iplookup=t["iplookup"]
+            self._color_tools=t.get("tools", "#8080ff")
             self._font_size=t["font_size"]; self._datetime_format=t["datetime_format"]
             self._datetime_position=t["datetime_position"]
             if "opacity" in t:
@@ -2919,8 +3311,7 @@ class App(tk.Tk):
                 "net":       self._color_net,
                 "disk":      self._color_disk,
                 "storage":   self._color_storage,
-                "speedtest": self._color_speedtest,
-                "iplookup":  self._color_iplookup,
+                "tools": self._color_tools,
                 # Display options
                 "font_size":       self._font_size,
                 "datetime_format": self._datetime_format,
@@ -2981,8 +3372,7 @@ class App(tk.Tk):
                 data.get("TEXT",    TEXT),
                 data.get("SUBTEXT", SUBTEXT),
                 data.get("DIM",     DIM),
-                data.get("speedtest", self._color_speedtest),
-                data.get("iplookup",  self._color_iplookup),
+                data.get("tools", self._color_tools),
             )
             # Apply display options
             if "font_size" in data:
@@ -3215,8 +3605,8 @@ class App(tk.Tk):
         # ── Title bar ─────────────────────────────────────────────────────────
         _make_titlebar(dlg, PANEL, BORDER, SUBTEXT, RED,
                        on_close=lambda: dlg.destroy() if dlg.winfo_exists() else None,
-                       title_text="⧖ IP LOOKUP", title_fg=self._color_iplookup, title_bg=PANEL,
-                       separator_color=self._color_iplookup)
+                       title_text="⧖ IP LOOKUP", title_fg=self._color_tools, title_bg=PANEL,
+                       separator_color=self._color_tools)
 
         # ── Inner content ─────────────────────────────────────────────────────
         inner = tk.Frame(dlg, bg=PANEL, padx=16, pady=12)
@@ -3351,12 +3741,12 @@ class App(tk.Tk):
                         def _reveal(e, l=lbl, v=val):
                             if not _public_revealed["v"]:
                                 _public_revealed["v"] = True
-                                l.config(text=v, fg=self._color_iplookup)
-                                l.bind("<Button-1>", lambda e2, l2=l: _copy(l2, self._color_iplookup))
+                                l.config(text=v, fg=self._color_tools)
+                                l.bind("<Button-1>", lambda e2, l2=l: _copy(l2, self._color_tools))
                                 l.bind("<Enter>",    lambda e2, l2=l: l2.config(fg=GREEN))
-                                l.bind("<Leave>",    lambda e2, l2=l: l2.config(fg=self._color_iplookup) if l2.cget("text") != "✓ copied" else None)
+                                l.bind("<Leave>",    lambda e2, l2=l: l2.config(fg=self._color_tools) if l2.cget("text") != "✓ copied" else None)
                             else:
-                                _copy(l, self._color_iplookup)
+                                _copy(l, self._color_tools)
                         lbl.bind("<Button-1>", _reveal)
                         lbl.bind("<Enter>",    lambda e, l=lbl: l.config(fg=GREEN))
                         lbl.bind("<Leave>",    lambda e, l=lbl: l.config(fg=RED))
@@ -3401,7 +3791,7 @@ class App(tk.Tk):
             except Exception:
                 pass
             try:
-                self._st_btn.config(text="▶ SPEED TEST", fg=self._color_speedtest, cursor="arrow")
+                self._st_btn.config(text="▶ SPEED TEST", fg=self._color_tools, cursor="arrow")
             except Exception:
                 pass
             if dlg.winfo_exists():
@@ -3410,8 +3800,8 @@ class App(tk.Tk):
         # ── Title bar ─────────────────────────────────────────────────────────
         _make_titlebar(dlg, PANEL, BORDER, SUBTEXT, RED,
                        on_close=_close_popup,
-                       title_text="▶ SPEED TEST", title_fg=self._color_speedtest, title_bg=PANEL,
-                       separator_color=self._color_speedtest)
+                       title_text="▶ SPEED TEST", title_fg=self._color_tools, title_bg=PANEL,
+                       separator_color=self._color_tools)
 
         # ── Inner content ─────────────────────────────────────────────────────
         inner = tk.Frame(dlg, bg=PANEL, padx=16, pady=12)
@@ -3431,7 +3821,7 @@ class App(tk.Tk):
             ("Server",  "server",   TEXT),
             ("Ping",    "ping",     GREEN),
             ("↓ Down",  "download", ACCENT1),
-            ("↑ Up",    "upload",   self._color_speedtest),
+            ("↑ Up",    "upload",   self._color_tools),
         ]:
             row = tk.Frame(inner, bg=PANEL)
             row.pack(fill="x", pady=2)
@@ -3504,7 +3894,7 @@ class App(tk.Tk):
             except Exception:
                 pass
             try:
-                self._st_btn.config(text="▶ SPEED TEST", fg=self._color_speedtest, cursor="arrow")
+                self._st_btn.config(text="▶ SPEED TEST", fg=self._color_tools, cursor="arrow")
             except Exception:
                 pass
             if not dlg.winfo_exists():
@@ -3699,9 +4089,7 @@ class App(tk.Tk):
                 "net":       self._color_net,
                 "disk":      self._color_disk,
                 "storage":   self._color_storage,
-                "speedtest": self._color_speedtest,
-                "iplookup":  self._color_iplookup,
-                "font_size":       self._font_size,
+                "tools": self._color_tools,
                 "datetime_format": self._datetime_format,
                 "datetime_position": self._datetime_position,
                 "opacity":         round(float(self.wm_attributes("-alpha")), 2),
@@ -3815,7 +4203,7 @@ class App(tk.Tk):
                 self._apply_theme(
                     t["BG"], t["PANEL"], t["BORDER"],
                     t["gpu"], t["cpu"], t["mem"], t["net"], t["disk"], t["storage"],
-                    t["TEXT"], t["SUBTEXT"], t["DIM"], t["speedtest"], t["iplookup"],
+                    t["TEXT"], t["SUBTEXT"], t["DIM"], t["tools"],
                 )
                 self._apply_font_size(t["font_size"])
                 self._datetime_format   = t["datetime_format"]
@@ -4118,7 +4506,7 @@ class App(tk.Tk):
                 "GPU": self._color_gpu, "CPU": self._color_cpu,
                 "MEMORY": self._color_mem, "NETWORK": self._color_net,
                 "DISK": self._color_disk, "STORAGE": self._color_storage,
-                "SPEED TEST": self._color_speedtest, "IP LOOKUP": self._color_iplookup,
+                "TOOLS": self._color_tools,
                 "BACKGROUND": BG,
             }
             for lbl, sw in _swatch_refs.items():
@@ -4131,24 +4519,25 @@ class App(tk.Tk):
         _default_colors = {
             "GPU":        "#008000", "CPU":        "#800000", "MEMORY":    "#008080",
             "NETWORK":    "#7b30d1", "DISK":       "#8c4600", "STORAGE":   "#c0c0c0",
-            "SPEED TEST": "#8080ff", "IP LOOKUP":  "#8080ff", "BACKGROUND":"#0a0a0f",
+            "TOOLS":      "#8080ff",
+            "BACKGROUND":"#0a0a0f",
         }
         _recolor_keys = {
             "GPU": "_color_gpu", "CPU": "_color_cpu", "MEMORY": "_color_mem",
             "NETWORK": "_color_net", "DISK": "_color_disk", "STORAGE": "_color_storage",
-            "SPEED TEST": "_color_speedtest", "IP LOOKUP": "_color_iplookup",
+            "TOOLS": "_color_tools",
         }
         _recolor_cmds = {
             "GPU": self._recolor_gpu, "CPU": self._recolor_cpu,
             "MEMORY": self._recolor_mem, "NETWORK": self._recolor_net,
             "DISK": self._recolor_disk, "STORAGE": self._recolor_storage,
-            "SPEED TEST": self._recolor_speedtest, "IP LOOKUP": self._recolor_iplookup,
+            "TOOLS": self._recolor_tools,
             "BACKGROUND": self._recolor_bg,
         }
         _current_colors = {
             "GPU": self._color_gpu, "CPU": self._color_cpu, "MEMORY": self._color_mem,
             "NETWORK": self._color_net, "DISK": self._color_disk, "STORAGE": self._color_storage,
-            "SPEED TEST": self._color_speedtest, "IP LOOKUP": self._color_iplookup,
+            "TOOLS": self._color_tools,
             "BACKGROUND": BG,
         }
 
@@ -4176,12 +4565,14 @@ class App(tk.Tk):
                         for b in self._storage_bars:
                             try: b.accent = def_col
                             except Exception: pass
-                    elif key == "_color_speedtest":
-                        self._color_speedtest = def_col
+                    elif key == "_color_tools":
+                        self._color_tools = def_col
                         try: self._st_btn.config(fg=def_col)
                         except Exception: pass
-                    elif key == "_color_iplookup":
-                        self._color_iplookup = def_col
+                        try: self._ip_btn.config(fg=def_col)
+                        except Exception: pass
+                        try: self._mem_clean_btn.config(fg=def_col)
+                        except Exception: pass
                     else:
                         setattr(self, key, def_col)
                         section_map = {
@@ -4255,7 +4646,7 @@ class App(tk.Tk):
             _swatch_refs[label] = swatch
 
         for label in ["GPU", "CPU", "MEMORY", "NETWORK", "DISK",
-                      "STORAGE", "SPEED TEST", "IP LOOKUP", "BACKGROUND"]:
+                      "STORAGE", "TOOLS", "BACKGROUND"]:
             _make_recolor_row(label)
 
         tk.Frame(popup, bg=BORDER, height=1).pack(fill="x", padx=12, pady=(4, 2))
@@ -4650,8 +5041,7 @@ class App(tk.Tk):
         "_color_net":       "#7b30d1",
         "_color_disk":      "#8c4600",
         "_color_storage":   "#c0c0c0",
-        "_color_speedtest": "#8080ff",
-        "_color_iplookup":  "#8080ff",
+        "_color_tools":     "#8080ff",
         "BG":               "#0a0a0f",
     }
 
@@ -4754,11 +5144,22 @@ class App(tk.Tk):
         _live(color)
         self._save_position()
 
-    def _recolor_speedtest(self):
-        self._recolor_btn("_color_speedtest", "_st_btn")
-
-    def _recolor_iplookup(self):
-        self._recolor_btn("_color_iplookup", "_ip_btn")
+    def _recolor_tools(self):
+        current = self._color_tools
+        def _live(c):
+            try: self._st_btn.config(fg=c)
+            except Exception: pass
+            try: self._ip_btn.config(fg=c)
+            except Exception: pass
+            try: self._mem_clean_btn.config(fg=c)
+            except Exception: pass
+        color = self._pick_color(current, key="_color_tools", live_cb=_live)
+        if not color:
+            _live(current)
+            return
+        self._color_tools = color
+        _live(color)
+        self._save_position()
 
     def _fmt_temp(self, val):
         """Format a temperature value according to the current unit setting."""
@@ -4906,7 +5307,7 @@ class App(tk.Tk):
             "gpu": self._color_gpu, "cpu": self._color_cpu,
             "mem": self._color_mem, "net": self._color_net,
             "disk": self._color_disk, "storage": self._color_storage,
-            "speedtest": self._color_speedtest, "iplookup": self._color_iplookup,
+            "tools": self._color_tools,
             "font_size": self._font_size,
             "datetime_format": self._datetime_format,
             "datetime_position": self._datetime_position,
@@ -4917,7 +5318,7 @@ class App(tk.Tk):
             data.setdefault(key, val)
         return data
 
-    def _apply_theme(self, bg, panel, border, c_gpu, c_cpu, c_mem, c_net, c_disk, c_storage, text, subtext, dim, c_speedtest=None, c_iplookup=None):
+    def _apply_theme(self, bg, panel, border, c_gpu, c_cpu, c_mem, c_net, c_disk, c_storage, text, subtext, dim, c_tools=None, *_ignored):
         global BG, PANEL, BORDER, TEXT, SUBTEXT, DIM
         old_bg, old_panel, old_border = BG, PANEL, BORDER
         old_text, old_subtext, old_dim = TEXT, SUBTEXT, DIM
@@ -4927,13 +5328,13 @@ class App(tk.Tk):
         self._color_cpu = c_cpu; self._color_mem = c_mem
         self._color_net = c_net; self._color_disk = c_disk
         self._color_storage = c_storage
-        if c_speedtest is not None:
-            self._color_speedtest = c_speedtest
-        if c_iplookup is not None:
-            self._color_iplookup = c_iplookup
-        try: self._st_btn.config(fg=self._color_speedtest)
+        if c_tools is not None:
+            self._color_tools = c_tools
+        try: self._st_btn.config(fg=self._color_tools)
         except Exception: pass
-        try: self._ip_btn.config(fg=self._color_iplookup)
+        try: self._ip_btn.config(fg=self._color_tools)
+        except Exception: pass
+        try: self._mem_clean_btn.config(fg=self._color_tools)
         except Exception: pass
         for hdr, color in [
             (self._gpu_hdr, c_gpu),
@@ -4999,7 +5400,7 @@ class App(tk.Tk):
             self._apply_theme(
                 t["BG"], t["PANEL"], t["BORDER"],
                 t["gpu"], t["cpu"], t["mem"], t["net"], t["disk"], t["storage"],
-                t["TEXT"], t["SUBTEXT"], t["DIM"], t["speedtest"], t["iplookup"],
+                t["TEXT"], t["SUBTEXT"], t["DIM"], t["tools"],
             )
             self._apply_font_size(t["font_size"])
             self._datetime_format   = t["datetime_format"]
@@ -6180,7 +6581,7 @@ class App(tk.Tk):
         _section("  ·  Sections")
         _row("▸ GPU",              "Load · VRAM · Temp · Wattage")
         _row("▸ CPU",              "Load · Frequency · Processes")
-        _row("▸ MEMORY",           "RAM usage · Peak tracking")
+        _row("▸ MEMORY",           "RAM usage · Peak tracking · Memory Cleaner")
         _row("▸ NETWORK",          "Down/Up speed · Tools dropdown")
         _row("▸ DISK",             "Read/Write I/O · Peak tracking")
         _row("▸ STORAGE",          "Per-drive usage · Ctrl-click to refresh")
@@ -6189,6 +6590,14 @@ class App(tk.Tk):
         _row("▶ TOOLS",            "Expand speed test & IP lookup")
         _row("▶ SPEED TEST",       "Native speed test — ping, down, up (no browser)")
         _row("⌖ IP LOOKUP",        "Fetch & display your public IP info")
+
+        _section("  ·  Memory Tools")
+        _row("▶ TOOLS",            "Expand the Memory Cleaner dropdown")
+        _row("🧹 MEMORY CLEAN",    "Open the Memory Cleaner popup")
+        _row("Safe Clean",         "Trims working sets, flushes modified pages & caches\n"
+                                   "                   — safe for games & browsers")
+        _row("Aggressive Clean",   "All Safe steps + standby list purge & memory\n"
+                                   "                   compression — may cause brief stutter")
 
         _section("  ·  Settings")
         _row("START WITH WINDOWS", "Add / remove Windows startup entry")
@@ -6204,6 +6613,8 @@ class App(tk.Tk):
         _section("  ·  Theme Picker")
         _row("Colour swatches",    "Click any swatch to pick a new colour")
         _row("↺  reset arrow",     "Restore that slot to its default colour")
+        _row("Dropdown Tools",     "One colour swatch controls ALL tool buttons\n"
+                                   "                   across Network & Memory dropdowns")
         _row("SAVE THEME",         "Save current colours as a named theme")
         _row("RESET THEME",        "Revert everything to the Default theme")
 
@@ -6245,8 +6656,12 @@ class App(tk.Tk):
         # PyDisplay label + help button — right side of title bar, vertically centred
         _tb_right = tk.Frame(_main_tb, bg=BG)
         _tb_right.pack(side="right", padx=(0, 6))
-        tk.Label(_tb_right, text="PyDisplay", bg=BG, fg=GREEN,
-                 font=(_FONT, _BASE_FONT_SIZE, "bold")).pack(anchor="e")
+        _pd_row = tk.Frame(_tb_right, bg=BG)
+        _pd_row.pack(anchor="e")
+        tk.Label(_pd_row, text="PyDisplay", bg=BG, fg=GREEN,
+                 font=(_FONT, _BASE_FONT_SIZE, "bold")).pack(side="left")
+        tk.Label(_pd_row, text=f" - v{_APP_VERSION}", bg=BG, fg=SUBTEXT,
+                 font=(_FONT, _BASE_FONT_SIZE - 2)).pack(side="left")
 
         # Datetime label for TOP position — sits in drag spacer between ✕ and PyDisplay
         self._time_top_lbl = tk.Label(_main_tb, text="", bg=BG, fg=SUBTEXT,
@@ -6574,6 +6989,282 @@ class App(tk.Tk):
             "Highest RAM usage percentage seen this session.\n"
             "Resets when PyDisplay restarts.")
 
+        # ── Memory Tools dropdown (Memory Cleaner) ────────────────────────────
+        mem_tools_drop = tk.Frame(mf, bg=BORDER, padx=4, pady=2)
+
+        def _toggle_mem_tools(e=None):
+            if not self._ctrl_ok(e.state if e else 0):
+                return
+            if mem_tools_drop.winfo_ismapped():
+                mem_tools_drop.pack_forget()
+                mem_tools_btn.config(text="▶ TOOLS", fg="#9999cc")
+            else:
+                mem_tools_drop.pack(fill="x", pady=(2, 0))
+                mem_tools_btn.config(text="▼ TOOLS", fg=GREEN)
+            self.update_idletasks()
+            self.geometry(f"{self.winfo_width()}x{self.winfo_reqheight()}")
+
+        mr.columnconfigure(4, weight=0)
+        mem_tools_btn = tk.Label(
+            mr, text="▶ TOOLS", bg=BORDER, fg="#9999cc",
+            font=(_FONT, _BASE_FONT_SIZE - 3, "bold"), cursor="arrow", padx=5, pady=2
+        )
+        mem_tools_btn.grid(row=0, column=4, rowspan=2, sticky="e", padx=(4, 0))
+        mem_tools_btn.bind("<Button-1>", _toggle_mem_tools)
+        mem_tools_btn.bind("<Enter>",  lambda e: mem_tools_btn.config(fg=GREEN, cursor="hand2") if self._ctrl_ok(e.state) else None)
+        mem_tools_btn.bind("<Leave>",  lambda e: mem_tools_btn.config(fg="#9999cc", cursor="arrow"))
+        self._bind_tooltip(mem_tools_btn,
+            "## ▶ TOOLS\n"
+            "Expand memory tools: Safe Clean and Aggressive Clean.\n"
+            "# Ctrl+Click to expand / collapse")
+
+        clean_btn = self._mem_clean_btn = tk.Label(
+            mem_tools_drop, text="🧹 MEMORY CLEAN", bg=BORDER, fg=self._color_tools,
+            font=(_FONT, _BASE_FONT_SIZE - 3, "bold"), cursor="arrow", padx=5, pady=2
+        )
+        clean_btn.pack(fill="x")
+        clean_btn.bind("<Button-1>", lambda e: self._mem_clean_popup() if self._ctrl_ok(e.state) else None)
+        clean_btn.bind("<Enter>",   lambda e: clean_btn.config(fg=GREEN, cursor="hand2") if self._ctrl_ok(e.state) else None)
+        clean_btn.bind("<Leave>",   lambda e: clean_btn.config(fg=self._color_tools, cursor="arrow"))
+        self._bind_tooltip(clean_btn,
+            "## 🧹 MEMORY CLEAN\n"
+            "Opens the memory cleaner. Choose between\n"
+            "Safe Clean (gaming-friendly) or Aggressive Clean\n"
+            "(maximum recovery, may stutter in games).\n"
+            "# Ctrl+Click to open")
+
+
+    def _mem_clean_popup(self):
+        """Open the memory cleaner popup with Safe / Aggressive mode selection inside."""
+        # If already open, raise it
+        if self._mem_safe_popup and self._mem_safe_popup.winfo_exists():
+            self._mem_safe_popup.lift()
+            return
+
+        _mode      = {"aggressive": False}   # current selected mode
+        _running   = {"v": False}
+        _spin_job  = [None]
+        _spin_chars = ["◐", "◓", "◑", "◒"]
+        _spin_state = {"idx": 0}
+
+        dlg = self._make_popup()
+        dlg.configure(bg=PANEL)
+        self._mem_safe_popup = dlg          # reuse one attr — only one popup now
+        self._raise_popup("_mem_safe_popup")
+        dlg.bind("<ButtonPress>", lambda e: self._raise_popup("_mem_safe_popup"))
+        dlg.after(30, lambda: self._pin_popup_topmost(dlg) if dlg.winfo_exists() else None)
+
+        def _close_popup():
+            try:
+                if self._mem_clean_btn:
+                    self._mem_clean_btn.config(text="🧹 MEMORY CLEAN",
+                                               fg=self._color_tools, cursor="arrow")
+            except Exception:
+                pass
+            if dlg.winfo_exists():
+                dlg.destroy()
+
+        # ── Title bar ─────────────────────────────────────────────────────────
+        _make_titlebar(dlg, PANEL, BORDER, SUBTEXT, RED,
+                       on_close=_close_popup,
+                       title_text="🧹 MEMORY CLEAN", title_fg=self._color_tools,
+                       title_bg=PANEL, separator_color=self._color_tools)
+
+        # ── Inner content ─────────────────────────────────────────────────────
+        inner = tk.Frame(dlg, bg=PANEL, padx=16, pady=10)
+        inner.pack(fill="x")
+
+        # ── Mode selector (Safe / Aggressive) ─────────────────────────────────
+        mode_row = tk.Frame(inner, bg=PANEL)
+        mode_row.pack(fill="x", pady=(0, 8))
+
+        def _set_mode(aggressive):
+            _mode["aggressive"] = aggressive
+            if aggressive:
+                safe_sel.config(fg=SUBTEXT, bg=BORDER)
+                aggr_sel.config(fg=self._color_tools, bg=DIM)
+            else:
+                safe_sel.config(fg=self._color_tools, bg=DIM)
+                aggr_sel.config(fg=SUBTEXT, bg=BORDER)
+
+        safe_sel = tk.Label(mode_row, text="⚡ SAFE", bg=DIM, fg=self._color_tools,
+                            font=(_FONT, _BASE_FONT_SIZE - 2, "bold"),
+                            cursor="hand2", padx=8, pady=3)
+        safe_sel.pack(side="left", padx=(0, 4))
+        safe_sel.bind("<Button-1>", lambda e: _set_mode(False) if not _running["v"] else None)
+        safe_sel.bind("<Enter>",    lambda e: safe_sel.config(fg=GREEN) if not _running["v"] else None)
+        safe_sel.bind("<Leave>",    lambda e: safe_sel.config(fg=self._color_tools if not _mode["aggressive"] else SUBTEXT))
+
+        aggr_sel = tk.Label(mode_row, text="🔥 AGGRESSIVE", bg=BORDER, fg=SUBTEXT,
+                            font=(_FONT, _BASE_FONT_SIZE - 2, "bold"),
+                            cursor="hand2", padx=8, pady=3)
+        aggr_sel.pack(side="left")
+        aggr_sel.bind("<Button-1>", lambda e: _set_mode(True) if not _running["v"] else None)
+        aggr_sel.bind("<Enter>",    lambda e: aggr_sel.config(fg=GREEN) if not _running["v"] else None)
+        aggr_sel.bind("<Leave>",    lambda e: aggr_sel.config(fg=self._color_tools if _mode["aggressive"] else SUBTEXT))
+
+        # Mode description label
+        mode_desc = tk.Label(inner, text="Gaming-friendly. No stutters.", bg=PANEL, fg=SUBTEXT,
+                             font=(_FONT, _BASE_FONT_SIZE - 3), anchor="w")
+        mode_desc.pack(fill="x", pady=(0, 6))
+
+        def _update_desc():
+            if _mode["aggressive"]:
+                mode_desc.config(text="⚠ Purges standby list. May stutter in games.")
+            else:
+                mode_desc.config(text="Gaming-friendly. No stutters.")
+
+        # Patch _set_mode to also update desc
+        _orig_set_mode = _set_mode
+        def _set_mode(aggressive):
+            _orig_set_mode(aggressive)
+            _update_desc()
+        safe_sel.bind("<Button-1>", lambda e: _set_mode(False) if not _running["v"] else None)
+        aggr_sel.bind("<Button-1>", lambda e: _set_mode(True)  if not _running["v"] else None)
+
+        tk.Frame(inner, bg=BORDER, height=1).pack(fill="x", pady=(0, 8))
+
+        # ── Spinner / status ──────────────────────────────────────────────────
+        spin_lbl = tk.Label(inner, text="–  Ready", bg=PANEL, fg=SUBTEXT,
+                            font=(_FONT, _BASE_FONT_SIZE - 1, "bold"))
+        spin_lbl.pack(pady=(0, 8))
+
+        # ── Result rows ───────────────────────────────────────────────────────
+        _fields = {}
+        for label, key, color in [
+            ("Before", "before", SUBTEXT),
+            ("After",  "after",  self._color_tools),
+            ("Freed",  "freed",  GREEN),
+        ]:
+            row = tk.Frame(inner, bg=PANEL)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=f"{label}:", bg=PANEL, fg=SUBTEXT,
+                     font=(_FONT, _BASE_FONT_SIZE - 2), anchor="e", width=8).pack(side="left")
+            val = tk.Label(row, text="—", bg=PANEL, fg=color,
+                           font=(_FONT, _BASE_FONT_SIZE, "bold"), anchor="w")
+            val.pack(side="left", padx=(4, 0))
+            _fields[key] = val
+
+        # ── Bottom bar ────────────────────────────────────────────────────────
+        tk.Frame(dlg, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(8, 0))
+        btn_row = tk.Frame(dlg, bg=PANEL, pady=6)
+        btn_row.pack(fill="x", padx=12)
+
+        run_btn = tk.Label(btn_row, text="RUN", bg=BORDER, fg=GREEN,
+                           font=(_FONT, _BASE_FONT_SIZE - 2, "bold"), cursor="hand2",
+                           padx=10, pady=3)
+        run_btn.pack(side="left")
+        run_btn.bind("<Enter>", lambda e: run_btn.config(fg=ACCENT1) if run_btn.cget("text") in ("RUN", "RE-RUN") else None)
+        run_btn.bind("<Leave>", lambda e: run_btn.config(fg=GREEN)   if run_btn.cget("text") in ("RUN", "RE-RUN") else None)
+
+        close_btn = tk.Label(btn_row, text="CLOSE", bg=BORDER, fg=SUBTEXT,
+                             font=(_FONT, _BASE_FONT_SIZE - 2, "bold"), cursor="hand2",
+                             padx=10, pady=3)
+        close_btn.pack(side="right")
+        close_btn.bind("<Button-1>", lambda e: _close_popup())
+        close_btn.bind("<Enter>",    lambda e: close_btn.config(fg=RED))
+        close_btn.bind("<Leave>",    lambda e: close_btn.config(fg=SUBTEXT))
+
+        # ── Spinner tick ──────────────────────────────────────────────────────
+        def _tick():
+            if not dlg.winfo_exists() or not _running["v"]:
+                return
+            _spin_state["idx"] = (_spin_state["idx"] + 1) % len(_spin_chars)
+            ch  = _spin_chars[_spin_state["idx"]]
+            cur = spin_lbl.cget("text")
+            tail = cur.split("  ", 1)[1] if "  " in cur else cur
+            spin_lbl.config(text=f"{ch}  {tail}")
+            _spin_job[0] = self.after(120, _tick)
+
+        def _on_phase(msg):
+            if dlg.winfo_exists():
+                spin_lbl.config(text=f"{_spin_chars[_spin_state['idx']]}  {msg}")
+
+        # ── Run on demand ─────────────────────────────────────────────────────
+        def _start_clean():
+            if _running["v"]:
+                return
+            _running["v"] = True
+            aggressive = _mode["aggressive"]
+            accent = self._color_tools if aggressive else self._color_tools
+
+            # Lock mode selectors while running
+            safe_sel.unbind("<Button-1>"); aggr_sel.unbind("<Button-1>")
+
+            run_btn.config(text="RUNNING", fg=SUBTEXT, cursor="arrow")
+            run_btn.unbind("<Button-1>")
+            for f in _fields.values():
+                f.config(text="—")
+            _, used_before, _ = _mc_get_ram_mb()
+            before_str = f"{used_before/1024:.2f} GB" if used_before >= 1024 else f"{used_before:,.0f} MB"
+            _fields["before"].config(text=before_str)
+            spin_lbl.config(text="◐  Starting…", fg=accent)
+            _spin_job[0] = self.after(120, _tick)
+
+            def _work():
+                return _mc_run(aggressive=aggressive,
+                               log_cb=lambda m: self.after(0, lambda msg=m: _on_phase(msg)))
+
+            def _done(freed):
+                _running["v"] = False
+                try:
+                    if _spin_job[0]: self.after_cancel(_spin_job[0])
+                except Exception:
+                    pass
+                if not dlg.winfo_exists():
+                    return
+                # Re-enable mode selectors
+                safe_sel.bind("<Button-1>", lambda e: _set_mode(False) if not _running["v"] else None)
+                aggr_sel.bind("<Button-1>", lambda e: _set_mode(True)  if not _running["v"] else None)
+                _, used_after, _ = _mc_get_ram_mb()
+                sign = "+" if freed >= 0 else ""
+                if abs(freed) >= 1000:
+                    freed_str = f"{sign}{freed/1024:.1f} GB"
+                    after_str = f"{used_after/1024:.2f} GB"
+                else:
+                    freed_str = f"{sign}{freed:,.0f} MB"
+                    after_str = f"{used_after:,.0f} MB"
+                spin_lbl.config(text="✓  Complete", fg=GREEN)
+                _fields["after"].config(text=after_str)
+                _fields["freed"].config(text=freed_str, fg=GREEN)
+                run_btn.config(text="RE-RUN", fg=GREEN, cursor="hand2")
+                run_btn.bind("<Button-1>", lambda e: _start_clean())
+                run_btn.bind("<Enter>",    lambda e: run_btn.config(fg=ACCENT1))
+                run_btn.bind("<Leave>",    lambda e: run_btn.config(fg=GREEN))
+
+            def _thread_run():
+                freed = _work()
+                self.after(0, lambda f=freed: _done(f))
+
+            threading.Thread(target=_thread_run, daemon=True).start()
+
+        run_btn.bind("<Button-1>", lambda e: _start_clean())
+
+        # ── Position popup ────────────────────────────────────────────────────
+        self._apply_font_size(self._font_size, root=dlg)
+        dlg.update_idletasks()
+        dw = max(dlg.winfo_reqwidth(), 270)
+        dh = dlg.winfo_reqheight()
+        ax = self.winfo_rootx(); ay = self.winfo_rooty(); aw = self.winfo_width()
+        sw = self.winfo_screenwidth(); sh = self.winfo_screenheight()
+        x = ax + (aw - dw) // 2
+        y = ay - dh
+        for pa in ("_speedtest_popup", "_iplookup_popup"):
+            p = getattr(self, pa, None)
+            if p and p.winfo_exists():
+                try:
+                    y = min(y, int(p.geometry().split("+")[2]) - dh)
+                except Exception:
+                    pass
+        x = max(10, min(x, sw - dw - 10))
+        y = max(10, min(y, sh - dh - 10))
+        dlg.geometry(f"{dw}x{dh}+{x}+{y}")
+
+    def _mem_safe_clean(self):
+        self._mem_clean_popup()
+
+    def _mem_aggressive_clean(self):
+        self._mem_clean_popup()
 
     def _build_net(self):
         # ── NETWORK ───────────────────────────────────────────────────────────
@@ -6638,13 +7329,13 @@ class App(tk.Tk):
             "# Ctrl+Click to expand / collapse")
 
         st_btn = self._st_btn = tk.Label(
-            net_tools_drop, text="▶ SPEED TEST", bg=BORDER, fg=self._color_speedtest,
+            net_tools_drop, text="▶ SPEED TEST", bg=BORDER, fg=self._color_tools,
             font=(_FONT, _BASE_FONT_SIZE - 3, "bold"), cursor="arrow", padx=5, pady=2
         )
         st_btn.pack(fill="x", pady=(0, 1))
         st_btn.bind("<Button-1>", lambda e: self._speedtest() if self._ctrl_ok(e.state) else None)
         st_btn.bind("<Enter>", lambda e: st_btn.config(fg=GREEN, cursor="hand2") if self._ctrl_ok(e.state) else None)
-        st_btn.bind("<Leave>", lambda e: st_btn.config(fg=self._color_speedtest, cursor="arrow"))
+        st_btn.bind("<Leave>", lambda e: st_btn.config(fg=self._color_tools, cursor="arrow"))
         self._bind_tooltip(st_btn,
             "## ▶ SPEED TEST\n"
             "Run a native speed test using Ookla servers.\n"
@@ -6653,13 +7344,13 @@ class App(tk.Tk):
             "# Ctrl+Click to run")
 
         ip_btn = self._ip_btn = tk.Label(
-            net_tools_drop, text="⌖ IP LOOKUP", bg=BORDER, fg=self._color_iplookup,
+            net_tools_drop, text="⌖ IP LOOKUP", bg=BORDER, fg=self._color_tools,
             font=(_FONT, _BASE_FONT_SIZE - 3, "bold"), cursor="arrow", padx=5, pady=2
         )
         ip_btn.pack(fill="x")
         ip_btn.bind("<Button-1>", lambda e: self._ip_lookup() if self._ctrl_ok(e.state) else None)
         ip_btn.bind("<Enter>", lambda e: ip_btn.config(fg=GREEN, cursor="hand2") if self._ctrl_ok(e.state) else None)
-        ip_btn.bind("<Leave>", lambda e: ip_btn.config(fg=self._color_iplookup, cursor="arrow"))
+        ip_btn.bind("<Leave>", lambda e: ip_btn.config(fg=self._color_tools, cursor="arrow"))
         self._bind_tooltip(ip_btn,
             "## ⌖ IP LOOKUP\n"
             "Shows your local IPv4, IPv6 and public IP.\n"
@@ -6804,6 +7495,12 @@ class App(tk.Tk):
         self.after(1000, self._update_datetime_lbl)
 
     def _poll(self):
+        # Skip this tick if the previous fetch thread is still running.
+        # Prevents thread pile-up when hardware calls (WMI, pynvml) stall.
+        if self._fetch_running:
+            self.after(self._refresh_ms, self._poll)
+            return
+        self._fetch_running = True
         threading.Thread(target=self._fetch, daemon=True).start()
 
     def _fetch(self):
@@ -6836,6 +7533,9 @@ class App(tk.Tk):
                        gpu, net_down, net_up, disk_read, disk_write, disk_usage, ram)
         except Exception as e:
             _log_error("_fetch", e)
+        finally:
+            # Always release the guard so the next poll can proceed
+            self._fetch_running = False
 
     def _apply(self, cpu_pct, freq_ghz, procs, threads, handles,
                gpu, net_down, net_up, disk_read, disk_write, disk_usage, ram):
@@ -6947,6 +7647,18 @@ class App(tk.Tk):
             "disk_read": disk_read, "disk_write": disk_write,
             "disk_usage": disk_usage,
         }
+
+        # Periodically purge dead widget references from _font_originals.
+        # Widgets are created/destroyed frequently (storage bars, tooltips, popups)
+        # and holding dead id→widget pairs is the primary source of RAM growth.
+        self._font_originals_prune_counter += 1
+        if self._font_originals_prune_counter >= 60:   # every ~60 polls (≈1 min at 1 s)
+            self._font_originals_prune_counter = 0
+            if hasattr(self, "_font_originals"):
+                dead = [wid for wid, (w, _) in self._font_originals.items()
+                        if not w.winfo_exists()]
+                for wid in dead:
+                    del self._font_originals[wid]
 
         self.after(self._refresh_ms, self._poll)
 
