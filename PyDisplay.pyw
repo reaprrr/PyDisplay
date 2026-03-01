@@ -6,6 +6,7 @@ import json
 import os
 import datetime
 import importlib
+import importlib.metadata as _importlib_metadata
 import subprocess
 import sys
 import traceback
@@ -30,7 +31,7 @@ _THEME_DIR  = _APP_DIR   # themes live alongside the config
 _FONT           = "Courier New" # single source of truth for the app font
 _BASE_FONT_SIZE = 9             # default font size; all remap logic is relative to this
 _CONFIG_VERSION  = 1             # increment when config schema changes; triggers migration
-_APP_VERSION     = "1.0.3"       # increment on each release; checked against GitHub latest tag
+_APP_VERSION     = "1.0.4"       # increment on each release; checked against GitHub latest tag
 _GITHUB_REPO     = "reaprrr/PyDisplay"
 
 # Default display section order — defined once, referenced everywhere
@@ -252,28 +253,26 @@ def _write_config(data):
         _log_error("_write_config", e)
 
 
-def _write_crash_log(exc_text):
-    """Write an unhandled exception to PyDisplay_error.log."""
+def _append_to_log(text):
+    """Append raw text to the error log file. Creates the file/dir if needed."""
     try:
         os.makedirs(_APP_DIR, exist_ok=True)
         with open(_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"\n{'─'*72}\n")
-            f.write(f"  CRASH — {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"{'─'*72}\n")
-            f.write(exc_text + "\n")
+            f.write(text)
     except Exception:
         pass
+
+
+def _write_crash_log(exc_text):
+    """Write an unhandled exception to PyDisplay_error.log."""
+    ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    _append_to_log(f"\n{'─'*72}\n  CRASH — {ts}\n{'─'*72}\n{exc_text}\n")
 
 
 def _log_error(context, exc):
     """Append a non-fatal error to the error log with context label."""
-    try:
-        os.makedirs(_APP_DIR, exist_ok=True)
-        with open(_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"\n  [{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
-                    f"  {context}: {exc}\n")
-    except Exception:
-        pass
+    ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    _append_to_log(f"\n  [{ts}]  {context}: {exc}\n")
 
 
 def _can_import(imp_name):
@@ -456,8 +455,7 @@ def _run_dependency_check():
     # ── Helper ────────────────────────────────────────────────────────────────
     def _get_version(pip_name):
         try:
-            import importlib.metadata
-            return importlib.metadata.version(pip_name)
+            return _importlib_metadata.version(pip_name)
         except Exception:
             return ""
 
@@ -814,8 +812,7 @@ def _run_dependency_check():
                         # install — verify via metadata only, skip live import check.
                         if pip_name_s == "pywin32":
                             try:
-                                import importlib.metadata as _m
-                                ver_str = f"✔  v{_m.version(pip_name_s)}"
+                                ver_str = f"✔  v{_importlib_metadata.version(pip_name_s)}"
                             except Exception:
                                 ver_str = "✔  installed"
                             inst_ref[0] = True
@@ -830,8 +827,7 @@ def _run_dependency_check():
                             except Exception as _ie:
                                 raise RuntimeError(f"installed but import failed: {_ie}")
                             try:
-                                import importlib.metadata as _m
-                                ver_str = f"✔  v{_m.version(pip_name_s)}"
+                                ver_str = f"✔  v{_importlib_metadata.version(pip_name_s)}"
                             except Exception:
                                 ver_str = "✔  installed"
                             inst_ref[0] = True
@@ -1088,8 +1084,7 @@ def _run_dependency_check():
             updates = []  # list of (disp, pip_name, current_ver, latest_ver)
             for disp, pip_name in _installed_pkgs:
                 try:
-                    import importlib.metadata as _m
-                    current = _m.version(pip_name)
+                    current = _importlib_metadata.version(pip_name)
                 except Exception:
                     continue
                 try:
@@ -1381,11 +1376,10 @@ def _run_dependency_check():
 
                 # ── Verify all are gone ──────────────────────────────────────
                 root.after(0, lambda: _upd_status_var.set("Verifying removal…"))
-                import importlib.metadata as _im
                 still_present = []
                 for rd in installed:
                     try:
-                        _im.version(rd["pip_name"])
+                        _importlib_metadata.version(rd["pip_name"])
                         still_present.append(rd["pip_name"])
                     except Exception:
                         pass  # gone — good
@@ -1844,8 +1838,7 @@ def _run_dependency_check():
                         if _import_err is not None:
                             raise RuntimeError(f"installed but import failed: {_import_err}")
                     try:
-                        import importlib.metadata as _m
-                        ver_str = f"✔  v{_m.version(pip_name)}"
+                        ver_str = f"✔  v{_importlib_metadata.version(pip_name)}"
                     except Exception:
                         ver_str = "✔  installed"
                     root.after(0, lambda sl=status_lbl, vs=ver_str: sl.config(text=vs, fg=GREEN))
@@ -2109,20 +2102,18 @@ def _save_dep_skip():
     """Write skip_dep_check=True into pos.json without overwriting other keys."""
     _write_config({"skip_dep_check": True})
 
+def _has_saved_position():
+    """Return True if a saved x/y position exists in the config."""
+    _d = _read_config()
+    return "x" in _d and "y" in _d
+
 def _reopen_picker_flagged():
     """Return True if user has enabled always-reopen Choose Position."""
     return bool(_read_config().get("reopen_picker", False))
 
 def _save_reopen_picker(enabled):
     """Write reopen_picker flag into pos.json without overwriting other keys."""
-    try:
-        os.makedirs(_APP_DIR, exist_ok=True)
-        cfg = _read_config()
-        cfg["reopen_picker"] = bool(enabled)
-        with open(_CFG_PATH, "w") as _f:
-            json.dump(cfg, _f, indent=2)
-    except Exception as e:
-        _log_error("_save_reopen_picker", e)
+    _write_config({"reopen_picker": bool(enabled)})
 
 
 # ── Singleton check — prevent multiple instances ──────────────────────────────
@@ -4109,8 +4100,6 @@ class App(tk.Tk):
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         x = ax + (aw - dw) // 2
-        # Default: bottom of popup aligns with top of main app
-        y = ay - dh
         # Stack popups upward: bottom of this popup = top of main app (or top of IP lookup)
         y = ay - dh
         ip = self._iplookup_popup
@@ -4206,12 +4195,9 @@ class App(tk.Tk):
 
         return body, title_lbl, hdr
 
-    def _save_theme(self, parent=None, on_save=None):
-        """Prompt for a name then save to PyDisplay_theme_<name>.json."""
-        dlg = self._make_popup()
-        dlg.configure(bg=PANEL)
-
-        def _centre_on_parent():
+    def _track_popup_to_parent(self, dlg, parent):
+        """Keep dlg centred on parent while both exist."""
+        def _centre():
             if parent and parent.winfo_exists():
                 dlg.update_idletasks()
                 dw, dh = dlg.winfo_width(), dlg.winfo_height()
@@ -4219,12 +4205,18 @@ class App(tk.Tk):
                 pw, ph = parent.winfo_width(), parent.winfo_height()
                 dlg.geometry(f"+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
                 dlg.lift()
-        def _track_parent():
+        def _track():
             if parent and parent.winfo_exists() and dlg.winfo_exists():
-                _centre_on_parent()
-                dlg.after(50, _track_parent)
+                _centre()
+                dlg.after(50, _track)
+        dlg.after(10, lambda: (_centre(), dlg.after(50, _track)))
 
-        dlg.after(10, lambda: (_centre_on_parent(), dlg.after(50, _track_parent)))
+    def _save_theme(self, parent=None, on_save=None):
+        """Prompt for a name then save to PyDisplay_theme_<name>.json."""
+        dlg = self._make_popup()
+        dlg.configure(bg=PANEL)
+
+        self._track_popup_to_parent(dlg, parent)
 
         tk.Label(dlg, text="SAVE THEME", bg=PANEL, fg=SUBTEXT,
                  font=(_FONT, _BASE_FONT_SIZE - 3, "bold")).pack(pady=(8, 4), padx=12)
@@ -4348,13 +4340,7 @@ class App(tk.Tk):
                 pw, ph = parent.winfo_width(), parent.winfo_height()
                 dlg.geometry(f"+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
                 dlg.lift()
-
-        def _track_parent():
-            if parent and parent.winfo_exists() and dlg.winfo_exists():
-                _centre_on_parent()
-                dlg.after(50, _track_parent)
-
-        dlg.after(10, lambda: (_centre_on_parent(), dlg.after(50, _track_parent)))
+        self._track_popup_to_parent(dlg, parent)
 
         # ── Header ────────────────────────────────────────────────────────────
         hdr = tk.Frame(dlg, bg=BORDER, padx=12, pady=6)
@@ -4695,30 +4681,21 @@ class App(tk.Tk):
                     sw.bind("<Enter>", lambda e, w=sw, col=c: w.config(bg=col, fg=BG))
                     sw.bind("<Leave>", lambda e, w=sw, col=c: w.config(bg=BORDER, fg=col))
 
-        _default_colors = {
-            "GPU":        "#008000", "CPU":        "#800000", "MEMORY":    "#008080",
-            "NETWORK":    "#7b30d1", "DISK":       "#8c4600", "STORAGE":   "#c0c0c0",
-            "TOOLS":      "#8080ff",
-            "BACKGROUND":"#0a0a0f",
+        # Single source of truth for each recolor row: (default_color, attr_key, recolor_cmd, current_color)
+        _recolor_data = {
+            "GPU":        ("#008000", "_color_gpu",     self._recolor_gpu,     self._color_gpu),
+            "CPU":        ("#800000", "_color_cpu",     self._recolor_cpu,     self._color_cpu),
+            "MEMORY":     ("#008080", "_color_mem",     self._recolor_mem,     self._color_mem),
+            "NETWORK":    ("#7b30d1", "_color_net",     self._recolor_net,     self._color_net),
+            "DISK":       ("#8c4600", "_color_disk",    self._recolor_disk,    self._color_disk),
+            "STORAGE":    ("#c0c0c0", "_color_storage", self._recolor_storage, self._color_storage),
+            "TOOLS":      ("#8080ff", "_color_tools",   self._recolor_tools,   self._color_tools),
+            "BACKGROUND": ("#0a0a0f", None,             self._recolor_bg,      BG),
         }
-        _recolor_keys = {
-            "GPU": "_color_gpu", "CPU": "_color_cpu", "MEMORY": "_color_mem",
-            "NETWORK": "_color_net", "DISK": "_color_disk", "STORAGE": "_color_storage",
-            "TOOLS": "_color_tools",
-        }
-        _recolor_cmds = {
-            "GPU": self._recolor_gpu, "CPU": self._recolor_cpu,
-            "MEMORY": self._recolor_mem, "NETWORK": self._recolor_net,
-            "DISK": self._recolor_disk, "STORAGE": self._recolor_storage,
-            "TOOLS": self._recolor_tools,
-            "BACKGROUND": self._recolor_bg,
-        }
-        _current_colors = {
-            "GPU": self._color_gpu, "CPU": self._color_cpu, "MEMORY": self._color_mem,
-            "NETWORK": self._color_net, "DISK": self._color_disk, "STORAGE": self._color_storage,
-            "TOOLS": self._color_tools,
-            "BACKGROUND": BG,
-        }
+        _default_colors  = {k: v[0] for k, v in _recolor_data.items()}
+        _recolor_keys    = {k: v[1] for k, v in _recolor_data.items() if v[1]}
+        _recolor_cmds    = {k: v[2] for k, v in _recolor_data.items()}
+        _current_colors  = {k: v[3] for k, v in _recolor_data.items()}
 
         def _make_recolor_row(label):
             cmd   = _recolor_cmds[label]
@@ -7365,7 +7342,7 @@ class App(tk.Tk):
                 return
             _running["v"] = True
             aggressive = _mode["aggressive"]
-            accent = self._color_tools if aggressive else self._color_tools
+            accent = self._color_tools
 
             # Lock mode selectors while running
             safe_sel.unbind("<Button-1>"); aggr_sel.unbind("<Button-1>")
@@ -7442,8 +7419,7 @@ class App(tk.Tk):
     def _mem_safe_clean(self):
         self._mem_clean_popup()
 
-    def _mem_aggressive_clean(self):
-        self._mem_clean_popup()
+    _mem_aggressive_clean = _mem_safe_clean
 
     def _build_net(self):
         # ── NETWORK ───────────────────────────────────────────────────────────
@@ -7844,9 +7820,6 @@ class App(tk.Tk):
 
 if __name__ == "__main__":
     # Show picker on first run (no config) or after dep install if no position saved yet
-    def _has_saved_position():
-        _d = _read_config()
-        return "x" in _d and "y" in _d
     _show_picker = not _has_saved_position() or _reopen_picker_flagged() or bool(_dep_result and _dep_result.get("reopen_placement"))
     if _show_picker:
         # ── First-run placement picker ────────────────────────────────────────
