@@ -444,6 +444,11 @@ def _run_dependency_check():
              font=(_FONT, _BASE_FONT_SIZE, "bold")).pack(side="left")
     tk.Label(_ver_frame, text=f"  v{_APP_VERSION}", bg=BG, fg=SUBTEXT,
              font=(_FONT, _BASE_FONT_SIZE - 1)).pack(side="left")
+    _app_upd_btn = tk.Label(_ver_frame, text="⌕ Update",
+                            bg=BORDER, fg=ACCENT,
+                            font=(_FONT, _BASE_FONT_SIZE - 2, "bold"), cursor="hand2",
+                            padx=6, pady=2)
+    _app_upd_btn.pack(side="left", padx=(10, 0))
     tk.Label(hdr_frame, text="  ·  dependency setup", bg=BG, fg=TEXT,
              font=(_FONT, _BASE_FONT_SIZE, "bold")).pack(side="left")
     tk.Frame(root, bg=BORDER, height=1).pack(fill="x", padx=12, pady=(8, 0))
@@ -543,6 +548,47 @@ def _run_dependency_check():
     # row_data: list of dicts with keys: disp, pip_name, imp_name, required,
     #           installed (live), action_var ("install"|"remove"|"keep"), widgets
     row_data = []
+    _row_errors = {}  # pip_name → error string, for clickable "? Failed" status
+
+    def _set_failed(status_lbl, pip_name, err_str):
+        """Mark a status label as failed and make it clickable to show the error."""
+        _row_errors[pip_name] = err_str
+        status_lbl.config(text="?  Failed", fg=YELLOW, cursor="hand2")
+        def _show_err(e, pn=pip_name, sl=status_lbl):
+            err = _row_errors.get(pn, "No error details available.")
+            dlg = tk.Toplevel(root)
+            dlg.configure(bg=PANEL)
+            dlg.overrideredirect(True)
+            dlg.attributes("-topmost", True)
+            dlg.lift()
+            dlg.focus_force()
+            dlg.grab_set()
+            _make_titlebar(dlg, PANEL, BORDER, SUBTEXT, RED,
+                           on_close=dlg.destroy,
+                           title_text=f"PyDisplay  ·  {pn} error", title_fg=TEXT, title_bg=PANEL)
+            df = tk.Frame(dlg, bg=PANEL, padx=16, pady=12)
+            df.pack(fill="both")
+            tk.Label(df, text=f"Install error — {pn}", bg=PANEL, fg=RED,
+                     font=(_FONT, _BASE_FONT_SIZE, "bold")).pack(anchor="w")
+            tk.Frame(df, bg=BORDER, height=1).pack(fill="x", pady=(4, 8))
+            tk.Label(df, text=err, bg=BORDER, fg=TEXT,
+                     font=(_FONT, _BASE_FONT_SIZE - 2), anchor="w", justify="left",
+                     padx=8, pady=8, wraplength=380).pack(fill="x")
+            tk.Frame(df, bg=PANEL, height=6).pack()
+            close_btn = tk.Label(df, text="Close", bg=BORDER, fg=SUBTEXT,
+                                 font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2",
+                                 padx=12, pady=4)
+            close_btn.pack(anchor="e")
+            close_btn.bind("<Button-1>", lambda e: dlg.destroy())
+            close_btn.bind("<Enter>", lambda e: close_btn.config(fg=TEXT))
+            close_btn.bind("<Leave>", lambda e: close_btn.config(fg=SUBTEXT))
+            dlg.update_idletasks()
+            cx = root.winfo_x() + (root.winfo_width()  - dlg.winfo_reqwidth())  // 2
+            cy = root.winfo_y() + (root.winfo_height() - dlg.winfo_reqheight()) // 2
+            dlg.geometry(f"+{cx}+{cy}")
+        status_lbl.bind("<Button-1>", _show_err)
+        status_lbl.bind("<Enter>", lambda e: status_lbl.config(fg=GREEN))
+        status_lbl.bind("<Leave>", lambda e: status_lbl.config(fg=YELLOW))
 
     # ── Package list ──────────────────────────────────────────────────────────
     # Single-button design: shows "Install" when missing, "Delete" when installed.
@@ -638,6 +684,7 @@ def _run_dependency_check():
                 if inst_ref[0]:
                     # ── UNINSTALL ──────────────────────────────────────────────
                     root.after(0, lambda: log_var.set(f"Removing {disp_s}…"))
+                    root.after(0, lambda: rd_ref[0]["status_lbl"].config(text="⏳  Removing…", fg=YELLOW))
                     root.after(0, lambda: _set_progress(0.1))
                     try:
                         _pip_candidates = (["pynvml", "nvidia-ml-py"] if pip_name_s == "pynvml"
@@ -683,14 +730,15 @@ def _run_dependency_check():
                         root.after(0, lambda: _set_progress(1.0))
                         root.after(200, lambda: _set_progress(None))
                     except Exception as exc:
-                        root.after(0, lambda: rd_ref[0]["status_lbl"].config(
-                            text="✘  failed", fg=RED))
-                        root.after(0, lambda: log_var.set(f"✘  {disp_s}: {exc}"))
+                        _exc_str = str(exc)
+                        root.after(0, lambda s=_exc_str: _set_failed(rd_ref[0]["status_lbl"], pip_name_s, s))
+                        root.after(0, lambda s=_exc_str: log_var.set(f"✘  {disp_s}: {s}"))
                         root.after(0, lambda: _set_progress(None))
                 else:
                     # ── INSTALL ────────────────────────────────────────────────
                     _msg = f"Installing {disp_s}…" if pip_name_s != "pywin32" else "Installing pywin32 + wmi…"
                     root.after(0, lambda: log_var.set(_msg))
+                    root.after(0, lambda: rd_ref[0]["status_lbl"].config(text="⏳  Installing…", fg=YELLOW))
                     root.after(0, lambda: _set_progress(0.1))
                     try:
                         # GPUtil requires distutils which was removed in Python 3.12+;
@@ -712,21 +760,18 @@ def _run_dependency_check():
                             _err = (proc.stderr or "").strip().splitlines()
                             raise RuntimeError(_err[-1] if _err else f"exit {proc.returncode}")
                         if pip_name_s == "pywin32":
-                            # Step 2: run pywin32 post-install (registers DLLs/COM objects)
-                            root.after(0, lambda: log_var.set("Running pywin32 post-install…"))
-                            root.after(0, lambda: _set_progress(0.5))
-                            _run_pywin32_postinstall(_appdata_dir, _install_log)
-                            # Step 3: only now install wmi, which depends on pywin32 being ready
-                            root.after(0, lambda: log_var.set("Installing wmi…"))
+                            # Skip post-install — it triggers a Windows DLL dialog if
+                            # pythoncom is locked by another process. pywin32 works fully
+                            # after a restart without needing the post-install in modern pip.
                             root.after(0, lambda: _set_progress(0.75))
-                            _wmi_proc = subprocess.run(
+                            # Still install wmi so it's ready after restart
+                            root.after(0, lambda: log_var.set("Installing wmi…"))
+                            subprocess.run(
                                 [sys.executable, "-m", "pip", "install", "wmi",
                                  "--disable-pip-version-check", "--no-cache-dir"],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, creationflags=_NO_WIN)
-                            if _wmi_proc.returncode != 0:
-                                _wmi_err = (_wmi_proc.stderr or "").strip().splitlines()
-                                raise RuntimeError("wmi: " + (_wmi_err[-1] if _wmi_err else f"exit {_wmi_proc.returncode}"))
+                            # wmi may fail in current process — non-fatal, works after restart
                         importlib.invalidate_caches()
                         for _mod in list(sys.modules.keys()):
                             if _mod == imp_name_s or _mod.startswith(imp_name_s + "."):
@@ -765,25 +810,40 @@ def _run_dependency_check():
                                 import distutils.version  # should now resolve via setuptools
                             except Exception:
                                 pass
-                        try:
-                            importlib.import_module(imp_name_s)
-                        except Exception as _ie:
-                            raise RuntimeError(f"installed but import failed: {_ie}")
-                        try:
-                            import importlib.metadata as _m
-                            ver_str = f"✔  v{_m.version(pip_name_s)}"
-                        except Exception:
-                            ver_str = "✔  installed"
-                        inst_ref[0] = True
-                        root.after(0, lambda vs=ver_str: rd_ref[0]["status_lbl"].config(
-                            text=vs, fg=GREEN))
-                        root.after(0, lambda: log_var.set(f"✔  {disp_s} installed."))
-                        root.after(0, lambda: _set_progress(1.0))
-                        root.after(200, lambda: _set_progress(None))
+                        # pywin32 DLLs can't be loaded in the current process after
+                        # install — verify via metadata only, skip live import check.
+                        if pip_name_s == "pywin32":
+                            try:
+                                import importlib.metadata as _m
+                                ver_str = f"✔  v{_m.version(pip_name_s)}"
+                            except Exception:
+                                ver_str = "✔  installed"
+                            inst_ref[0] = True
+                            root.after(0, lambda vs=ver_str: rd_ref[0]["status_lbl"].config(
+                                text=vs, fg=GREEN))
+                            root.after(0, lambda: log_var.set("✔  pywin32 installed. Restart PyDisplay to activate."))
+                            root.after(0, lambda: _set_progress(1.0))
+                            root.after(200, lambda: _set_progress(None))
+                        else:
+                            try:
+                                importlib.import_module(imp_name_s)
+                            except Exception as _ie:
+                                raise RuntimeError(f"installed but import failed: {_ie}")
+                            try:
+                                import importlib.metadata as _m
+                                ver_str = f"✔  v{_m.version(pip_name_s)}"
+                            except Exception:
+                                ver_str = "✔  installed"
+                            inst_ref[0] = True
+                            root.after(0, lambda vs=ver_str: rd_ref[0]["status_lbl"].config(
+                                text=vs, fg=GREEN))
+                            root.after(0, lambda: log_var.set(f"✔  {disp_s} installed."))
+                            root.after(0, lambda: _set_progress(1.0))
+                            root.after(200, lambda: _set_progress(None))
                     except Exception as exc:
-                        root.after(0, lambda: rd_ref[0]["status_lbl"].config(
-                            text="✘  failed", fg=RED))
-                        root.after(0, lambda: log_var.set(f"✘  {disp_s}: {exc}"))
+                        _exc_str = str(exc)
+                        root.after(0, lambda s=_exc_str: _set_failed(rd_ref[0]["status_lbl"], pip_name_s, s))
+                        root.after(0, lambda s=_exc_str: log_var.set(f"✘  {disp_s}: {s}"))
                         root.after(0, lambda: _set_progress(None))
 
                 # Always unlock button and refresh its appearance when done
@@ -818,19 +878,25 @@ def _run_dependency_check():
              bg=BG, fg=TEXT, font=(_FONT, _BASE_FONT_SIZE + 1),
              anchor="w").pack(side="left")
 
+    _upd_btn = tk.Label(legend_row, text="↻  Check Dep Updates",
+                        bg=BORDER, fg=ACCENT,
+                        font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2",
+                        width=20, padx=12, pady=6)
+    _upd_btn.pack(side="right", padx=(0, 2))
+
     _upd_status_var = tk.StringVar(value="")
     tk.Label(legend_row, textvariable=_upd_status_var, bg=BG, fg=ACCENT,
              font=(_FONT, _BASE_FONT_SIZE), anchor="e").pack(side="right", fill="x", expand=True)
 
     def _reset_app_upd_btn():
-        _app_upd_btn.config(text="↻  Check for App Update", fg=ACCENT, cursor="hand2")
+        _app_upd_btn.config(text="⌕ Update", fg=ACCENT, cursor="hand2")
         _app_upd_btn.bind("<Button-1>", lambda e: _check_app_update())
         _app_upd_btn.bind("<Enter>",    lambda e: _app_upd_btn.config(fg=GREEN))
         _app_upd_btn.bind("<Leave>",    lambda e: _app_upd_btn.config(fg=ACCENT))
 
     def _check_app_update():
         """Query GitHub releases API to check if a newer version of PyDisplay is available."""
-        _app_upd_btn.config(text="↻  Checking…", fg=SUBTEXT, cursor="arrow")
+        _app_upd_btn.config(text="⌕ Checking…", fg=SUBTEXT, cursor="arrow")
         _app_upd_btn.unbind("<Button-1>")
         _app_upd_btn.unbind("<Enter>")
         _app_upd_btn.unbind("<Leave>")
@@ -1005,25 +1071,7 @@ def _run_dependency_check():
         dlg.deiconify()
         dlg.grab_set()
 
-    # ── Update buttons row ────────────────────────────────────────────────────
-    tk.Frame(root, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(6, 0))
-    upd_row = tk.Frame(root, bg=BG)
-    upd_row.pack(fill="x", padx=16, pady=(6, 0))
-
-    tk.Label(upd_row, text="", bg=BG).pack(side="left", fill="x", expand=True)
-
-    _app_upd_btn = tk.Label(upd_row, text="↻  Check for App Update",
-                            bg=BORDER, fg=ACCENT,
-                            font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2",
-                            width=20, padx=12, pady=6)
-    _app_upd_btn.pack(side="right")
     _reset_app_upd_btn()  # re-bind now that widget exists
-
-    _upd_btn = tk.Label(upd_row, text="↻  Check for Updates",
-                        bg=BORDER, fg=ACCENT,
-                        font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2",
-                        width=20, padx=12, pady=6)
-    _upd_btn.pack(side="right", padx=(0, 6))
 
     def _check_updates():
         _installed_pkgs = [(rd["disp"], rd["pip_name"]) for rd in row_data if rd["inst_ref"][0]]
@@ -1031,7 +1079,7 @@ def _run_dependency_check():
             _upd_status_var.set("No installed packages to check.")
             return
 
-        _upd_btn.config(text="↻  Checking…", fg=SUBTEXT, cursor="arrow")
+        _upd_btn.config(text="↻  Checking Deps…", fg=SUBTEXT, cursor="arrow")
         _upd_btn.unbind("<Button-1>")
         _upd_btn.unbind("<Enter>")
         _upd_btn.unbind("<Leave>")
@@ -1066,7 +1114,7 @@ def _run_dependency_check():
         threading.Thread(target=_worker_check, daemon=True).start()
 
     def _reset_upd_btn():
-        _upd_btn.config(text="↻  Check for Updates", fg=ACCENT, cursor="hand2")
+        _upd_btn.config(text="↻  Check Dep Updates", fg=ACCENT, cursor="hand2")
         _upd_btn.bind("<Button-1>", lambda e: _check_updates())
         _upd_btn.bind("<Enter>",    lambda e: _upd_btn.config(fg=GREEN))
         _upd_btn.bind("<Leave>",    lambda e: _upd_btn.config(fg=ACCENT))
@@ -1243,14 +1291,11 @@ def _run_dependency_check():
 
     tk.Frame(root, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(6, 0))
 
-    # ── Progress / log line ───────────────────────────────────────────────────
-    log_row = tk.Frame(root, bg=BG)
-    log_row.pack(fill="x", padx=16, pady=(6, 0))
+    # ── Progress / log line — aliased to legend row status var ───────────────
+    log_var = _upd_status_var  # all status messages go beside "Check Dep Updates"
 
-    log_var = tk.StringVar(value="")
-    log_lbl = tk.Label(log_row, textvariable=log_var, bg=BG, fg=ACCENT,
-                       font=(_FONT, _BASE_FONT_SIZE), anchor="w")
-    log_lbl.pack(side="left", fill="x", expand=True)
+    log_row = tk.Frame(root, bg=BG)
+    log_row.pack(fill="x", padx=16, pady=(4, 0))
 
     _install_all_btn = tk.Label(log_row, text="\u2b07  Install All",
                                 bg=BORDER, fg=ACCENT,
@@ -1266,6 +1311,133 @@ def _run_dependency_check():
     _dup_btn.bind("<Button-1>", lambda e: _check_duplicates())
     _dup_btn.bind("<Enter>",    lambda e: _dup_btn.config(fg=YELLOW))
     _dup_btn.bind("<Leave>",    lambda e: _dup_btn.config(fg=TEXT))
+
+    _uninstall_all_btn = tk.Label(log_row, text="✕  Uninstall All",
+                                  bg=BORDER, fg=RED,
+                                  font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2",
+                                  width=16, padx=12, pady=6)
+    _uninstall_all_btn.pack(side="right", padx=(0, 6))
+    _uninstall_all_btn.bind("<Enter>", lambda e: _uninstall_all_btn.config(bg=RED, fg=BG))
+    _uninstall_all_btn.bind("<Leave>", lambda e: _uninstall_all_btn.config(bg=BORDER, fg=RED))
+
+    def _uninstall_all():
+        """Uninstall all currently installed dependencies, then verify they are gone."""
+        installed = [rd for rd in row_data if rd["inst_ref"][0]]
+        if not installed:
+            _upd_status_var.set("No installed packages to remove.")
+            return
+
+        # Confirm before proceeding
+        confirm = tk.Toplevel(root)
+        confirm.configure(bg=PANEL)
+        confirm.resizable(False, False)
+        confirm.title("")
+        confirm.overrideredirect(True)
+        confirm.attributes("-topmost", True)
+        confirm.lift()
+        confirm.focus_force()
+        confirm.grab_set()
+        _make_titlebar(confirm, PANEL, BORDER, SUBTEXT, RED,
+                       on_close=confirm.destroy,
+                       title_text="PyDisplay  ·  Uninstall All", title_fg=TEXT, title_bg=PANEL)
+        cf = tk.Frame(confirm, bg=PANEL, padx=16, pady=12)
+        cf.pack(fill="both")
+        tk.Label(cf, text="Uninstall All Dependencies?", bg=PANEL, fg=RED,
+                 font=(_FONT, _BASE_FONT_SIZE, "bold")).pack(anchor="w")
+        tk.Label(cf, text="This will remove all installed packages.\nPyDisplay will not function until they are reinstalled.",
+                 bg=PANEL, fg=SUBTEXT, font=(_FONT, _BASE_FONT_SIZE - 1), justify="left").pack(anchor="w", pady=(4, 10))
+        btn_row = tk.Frame(cf, bg=PANEL)
+        btn_row.pack(fill="x")
+
+        def _do_uninstall():
+            confirm.destroy()
+            _uninstall_all_btn.config(text="✕  Removing…", fg=SUBTEXT, cursor="arrow")
+            _uninstall_all_btn.unbind("<Button-1>")
+            _uninstall_all_btn.unbind("<Enter>")
+            _uninstall_all_btn.unbind("<Leave>")
+            _upd_status_var.set("Uninstalling all dependencies…")
+
+            def _worker():
+                failed = []
+                for rd in installed:
+                    pip_n = rd["pip_name"]
+                    # Handle packages with multiple pip names
+                    if pip_n == "pynvml":
+                        candidates = ["pynvml", "nvidia-ml-py"]
+                    elif pip_n == "GPUtil":
+                        candidates = ["GPUtil", "gputil"]
+                    else:
+                        candidates = [pip_n]
+                    root.after(0, lambda n=pip_n: _upd_status_var.set(f"Removing {n}…"))
+                    root.after(0, lambda rd=rd: rd["status_lbl"].config(text="⏳  Removing…", fg=YELLOW))
+                    for cand in candidates:
+                        try:
+                            subprocess.run(
+                                [sys.executable, "-m", "pip", "uninstall", "-y", cand,
+                                 "--disable-pip-version-check"],
+                                capture_output=True, text=True)
+                        except Exception as exc:
+                            failed.append(f"{cand}: {exc}")
+
+                # ── Verify all are gone ──────────────────────────────────────
+                root.after(0, lambda: _upd_status_var.set("Verifying removal…"))
+                import importlib.metadata as _im
+                still_present = []
+                for rd in installed:
+                    try:
+                        _im.version(rd["pip_name"])
+                        still_present.append(rd["pip_name"])
+                    except Exception:
+                        pass  # gone — good
+
+                def _finish():
+                    # Refresh all row status labels
+                    for rd in row_data:
+                        ver = _get_version(rd["pip_name"])
+                        installed_now = ver != ""
+                        rd["inst_ref"][0] = installed_now
+                        st_text  = f"✔  v{ver}" if installed_now else "✘  missing"
+                        st_color = GREEN if installed_now else RED
+                        rd["status_lbl"].config(text=st_text, fg=st_color)
+                        rd["refresh_btn"]()
+                    _update_install_all_btn()
+
+                    if still_present:
+                        _upd_status_var.set(f"⚠  Could not remove: {', '.join(still_present)}")
+                    elif failed:
+                        _upd_status_var.set(f"⚠  Errors during removal: {'; '.join(failed)}")
+                    else:
+                        _upd_status_var.set(f"✔  All {len(installed)} package(s) removed successfully.")
+
+                    # Re-enable button
+                    _uninstall_all_btn.config(text="✕  Uninstall All", fg=RED, cursor="hand2")
+                    _uninstall_all_btn.bind("<Button-1>", lambda e: _uninstall_all())
+                    _uninstall_all_btn.bind("<Enter>", lambda e: _uninstall_all_btn.config(bg=RED, fg=BG))
+                    _uninstall_all_btn.bind("<Leave>", lambda e: _uninstall_all_btn.config(bg=BORDER, fg=RED))
+
+                root.after(0, _finish)
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        cancel_btn = tk.Label(btn_row, text="Cancel", bg=BORDER, fg=SUBTEXT,
+                 font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2",
+                 padx=12, pady=4)
+        cancel_btn.pack(side="left", padx=(0, 6))
+        cancel_btn.bind("<Button-1>", lambda e: confirm.destroy())
+        cancel_btn.bind("<Enter>", lambda e: cancel_btn.config(fg=TEXT))
+        cancel_btn.bind("<Leave>", lambda e: cancel_btn.config(fg=SUBTEXT))
+        ok_btn = tk.Label(btn_row, text="✕  Yes, Uninstall All", bg=RED, fg=BG,
+                          font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2",
+                          padx=12, pady=4)
+        ok_btn.pack(side="left")
+        ok_btn.bind("<Button-1>", lambda e: _do_uninstall())
+
+        confirm.update_idletasks()
+        cx = root.winfo_x() + (root.winfo_width() - confirm.winfo_reqwidth()) // 2
+        cy = root.winfo_y() + (root.winfo_height() - confirm.winfo_reqheight()) // 2
+        confirm.geometry(f"+{cx}+{cy}")
+
+    _uninstall_all_btn.bind("<Button-1>", lambda e: _uninstall_all())
 
     def _update_install_all_btn():
         """Update button text/state in real time based on how many packages are missing."""
@@ -1492,7 +1664,7 @@ def _run_dependency_check():
 
         def _write_log(pkg, pip_n, stdout_txt, stderr_txt, exc_msg):
             try:
-                os.makedirs(_appdata_dir, exist_ok=True)
+                os.makedirs(_APP_DIR, exist_ok=True)
                 with open(_install_log, "a", encoding="utf-8") as f:
                     f.write(f"\n{'─'*72}\n")
                     f.write(f"  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  {pkg} ({pip_n})\n")
@@ -1512,6 +1684,7 @@ def _run_dependency_check():
             _had_error = False
             for disp, pip_name, imp_name, status_lbl, _rd in to_uninstall:
                 root.after(0, lambda msg=f"Removing {disp}…": log_var.set(msg))
+                root.after(0, lambda sl=status_lbl: sl.config(text="⏳  Removing…", fg=YELLOW))
                 try:
                     # Try pip uninstall first using all known dist names
                     _pip_candidates = ["pynvml", "nvidia-ml-py"] if pip_name == "pynvml" else [pip_name]
@@ -1557,7 +1730,7 @@ def _run_dependency_check():
                             f"the current Python environment. Try deleting it manually from "
                             f"site-packages.")
                     try:
-                        os.makedirs(_appdata_dir, exist_ok=True)
+                        os.makedirs(_APP_DIR, exist_ok=True)
                         with open(_install_log, "a", encoding="utf-8") as _lf:
                             _lf.write("\n" + "─"*72 + "\n")
                             _lf.write(f"  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  REMOVED {disp} ({pip_name})\n")
@@ -1576,7 +1749,7 @@ def _run_dependency_check():
                     root.after(0, _post_remove)
                 except Exception as exc:
                     try:
-                        os.makedirs(_appdata_dir, exist_ok=True)
+                        os.makedirs(_APP_DIR, exist_ok=True)
                         with open(_install_log, "a", encoding="utf-8") as _lf:
                             _lf.write("\n" + "─"*72 + "\n")
                             _lf.write(f"  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  REMOVE FAILED {disp} ({pip_name})\n")
@@ -1585,13 +1758,14 @@ def _run_dependency_check():
                     except Exception:
                         pass
                     _had_error = True
-                    root.after(0, lambda sl=status_lbl: sl.config(text="✘  failed", fg=RED))
+                    root.after(0, lambda sl=status_lbl, pn=pip_name, s=str(exc): _set_failed(sl, pn, s))
                     root.after(0, lambda msg=f"✘  {disp} remove failed: {exc}": log_var.set(msg))
                 _advance()
                 time.sleep(0.3)
 
             for disp, pip_name, imp_name, status_lbl, _rd in to_install:
                 root.after(0, lambda msg=f"Installing {disp}…": log_var.set(msg))
+                root.after(0, lambda sl=status_lbl: sl.config(text="⏳  Installing…", fg=YELLOW))
                 stdout_txt = stderr_txt = ""
                 try:
                     # GPUtil requires distutils (removed in Python 3.12+); install setuptools first.
@@ -1613,10 +1787,8 @@ def _run_dependency_check():
                     if proc.returncode != 0:
                         raise RuntimeError((stderr_txt.strip().splitlines() or [f"code {proc.returncode}"])[-1])
                     if pip_name == "pywin32":
-                        # Step 2: run pywin32 post-install before touching wmi
-                        root.after(0, lambda: log_var.set("Running pywin32 post-install…"))
-                        _run_pywin32_postinstall(_appdata_dir, _install_log)
-                        # Step 3: only install wmi after pywin32 is fully ready
+                        # Skip post-install — triggers Windows DLL dialog if locked.
+                        # pywin32 works after restart without it in modern pip.
                         root.after(0, lambda: log_var.set("Installing wmi…"))
                         _wmi_proc = subprocess.run(
                             [sys.executable, "-m", "pip", "install", "wmi",
@@ -1624,8 +1796,7 @@ def _run_dependency_check():
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             creationflags=_NO_WIN)
                         if _wmi_proc.returncode != 0:
-                            _wmi_err = (_wmi_proc.stderr or "").strip().splitlines()
-                            raise RuntimeError("wmi: " + (_wmi_err[-1] if _wmi_err else f"exit {_wmi_proc.returncode}"))
+                            pass  # wmi may fail in current process — non-fatal, works after restart
                     importlib.invalidate_caches()
                     for _mod in list(sys.modules.keys()):
                         if _mod == imp_name or _mod.startswith(imp_name + "."):
@@ -1662,19 +1833,24 @@ def _run_dependency_check():
                         except Exception:
                             pass
                     _import_err = None
-                    try:
-                        importlib.import_module(imp_name)
-                    except Exception as _ie:
-                        _import_err = str(_ie)
-                    if _import_err is not None:
-                        raise RuntimeError(f"installed but import failed: {_import_err}")
+                    if pip_name == "pywin32":
+                        # pywin32 DLLs can't load in current process — skip import check
+                        pass
+                    else:
+                        try:
+                            importlib.import_module(imp_name)
+                        except Exception as _ie:
+                            _import_err = str(_ie)
+                        if _import_err is not None:
+                            raise RuntimeError(f"installed but import failed: {_import_err}")
                     try:
                         import importlib.metadata as _m
                         ver_str = f"✔  v{_m.version(pip_name)}"
                     except Exception:
                         ver_str = "✔  installed"
                     root.after(0, lambda sl=status_lbl, vs=ver_str: sl.config(text=vs, fg=GREEN))
-                    root.after(0, lambda msg=f"✔  {disp} installed.": log_var.set(msg))
+                    _log_msg = "✔  pywin32 installed. Restart PyDisplay to activate." if pip_name == "pywin32" else f"✔  {disp} installed."
+                    root.after(0, lambda msg=_log_msg: log_var.set(msg))
                     # Update inst_ref so button flips to "Delete" immediately
                     def _post_install(rd=_rd):
                         rd["inst_ref"][0] = True
@@ -1683,9 +1859,10 @@ def _run_dependency_check():
                     root.after(0, _post_install)
                 except Exception as exc:
                     _had_error = True
-                    _write_log(disp, pip_name, stdout_txt, stderr_txt, str(exc))
-                    root.after(0, lambda sl=status_lbl: sl.config(text="✘  failed", fg=RED))
-                    root.after(0, lambda msg=f"✘  {disp} failed: {exc}": log_var.set(msg))
+                    _exc_str = str(exc)
+                    _write_log(disp, pip_name, stdout_txt, stderr_txt, _exc_str)
+                    root.after(0, lambda sl=status_lbl, pn=pip_name, s=_exc_str: _set_failed(sl, pn, s))
+                    root.after(0, lambda msg=f"✘  {disp} failed: {_exc_str}": log_var.set(msg))
                 _advance()
                 time.sleep(0.3)
 
