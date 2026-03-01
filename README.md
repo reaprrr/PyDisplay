@@ -70,6 +70,17 @@ Click **▶ TOOLS** in the Memory section to expand:
 
 ---
 
+## Dependency Manager
+On first launch PyDisplay opens a dependency setup page where you can install, update, and manage all required packages without leaving the app.
+
+- **⌕ Update** — checks GitHub for a new PyDisplay release
+- **↻ Check Dep Updates** — checks PyPI for newer versions of installed packages
+- **✕ Uninstall All** — removes all installed dependencies with a confirmation prompt and post-removal verification
+- **Check for Duplicates** — scans for packages installed in multiple locations and lets you clean them up
+- Package status labels show `? Failed` when an operation fails — click the label to see the exact error
+
+---
+
 ## Data & Config
 All config and logs are stored in `%APPDATA%\PyDisplay\`:
 
@@ -79,6 +90,7 @@ All config and logs are stored in `%APPDATA%\PyDisplay\`:
 | `PyDisplay_theme_Default.json` | Default theme (auto-created) |
 | `PyDisplay_theme_*.json` | Any saved custom themes |
 | `PyDisplay_log.txt` | Periodic stats snapshots (if logging enabled) |
+| `PyDisplay_install.log` | Dependency install/remove history |
 | `PyDisplay_error.log` | Non-fatal error log |
 
 ---
