@@ -4270,6 +4270,7 @@ class App(tk.Tk):
                 "disk":      self._color_disk,
                 "storage":   self._color_storage,
                 "tools": self._color_tools,
+                "font_size":         self._font_size,
                 "datetime_format": self._datetime_format,
                 "datetime_position": self._datetime_position,
                 "opacity":         round(float(self.wm_attributes("-alpha")), 2),
@@ -4286,7 +4287,7 @@ class App(tk.Tk):
                 status_lbl.config(text=f"✔  {fname} saved", fg=GREEN)
                 btn_row.pack_forget()
                 def _open_location(e, p=path):
-                    subprocess.Popen(f'explorer /select,"{p}"')
+                    subprocess.Popen(["explorer", f"/select,{p}"])
                 def _confirm():
                     if on_save:
                         on_save()
@@ -5577,19 +5578,11 @@ class App(tk.Tk):
 
     def _theme_dark(self):
         self._apply_theme(
-            BG, PANEL, BORDER,
-            "#008000", "#800000", "#008080", "#400080", "#8c4600", "#c0c0c0",
-            TEXT, SUBTEXT, DIM,
-            "#8080ff", "#8080ff",
+            "#0a0a0f", "#111118", "#1e1e2e",
+            "#008000", "#800000", "#008080", "#7b30d1", "#8c4600", "#c0c0c0",
+            "#e0e0f0", "#6868a0", "#3a3a5c",
+            "#8080ff",
         )
-        # Read font size from the Default theme file so it respects the user's
-        # chosen default rather than hardcoding a value here.
-        try:
-            with open(_DEFAULT_THEME_PATH) as _f:
-                _t = json.load(_f)
-            self._apply_font_size(_t.get("font_size", _BASE_FONT_SIZE))
-        except Exception:
-            self._apply_font_size(_BASE_FONT_SIZE)
 
 
     def _theme_terminal(self):
@@ -7659,6 +7652,8 @@ class App(tk.Tk):
         self.after(1000, self._update_datetime_lbl)
 
     def _poll(self):
+        if self._closing:
+            return
         # Skip this tick if the previous fetch thread is still running.
         # Prevents thread pile-up when hardware calls (WMI, pynvml) stall.
         if self._fetch_running:
@@ -7752,7 +7747,7 @@ class App(tk.Tk):
         self.net_up.set(net_up)
         self.net_peak_down_lbl.config(text=f"{self._net_peak_down:.2f} MB/s")
         self.net_peak_up_lbl.config(text=f"{self._net_peak_up:.2f} MB/s")
-        self._net_title.config(fg=RED if max(net_down, net_up) > 85 else self._color_net)
+        self._net_title.config(fg=RED if max(net_down, net_up) / max(net_max, 1) > 0.85 else self._color_net)
 
         # Disk I/O
         self._disk_peak_read  = max(self._disk_peak_read,  disk_read)
@@ -7824,7 +7819,8 @@ class App(tk.Tk):
                 for wid in dead:
                     del self._font_originals[wid]
 
-        self.after(self._refresh_ms, self._poll)
+        if not self._closing:
+            self.after(self._refresh_ms, self._poll)
 
 
 if __name__ == "__main__":
