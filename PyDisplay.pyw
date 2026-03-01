@@ -3145,17 +3145,18 @@ class App(tk.Tk):
 
     def _popup_pos(self, pw, ph):
         """Return (x, y) to position a popup centred on the app window.
-        Reads app position from the saved config so it stays correct under
-        fullscreen games where winfo_* calls return unreliable values."""
-        # --- app window position: prefer saved config (reliable under fullscreen) ---
+        Reads live window position first so the popup always follows the current
+        location, even if the window was moved since the config was last saved.
+        Falls back to the saved config (reliable under fullscreen games where
+        winfo_* calls return unreliable values)."""
+        # --- app window position: prefer live geometry (always up-to-date) ---
         try:
-            pos = _read_config()
-            ax = int(pos["x"])
-            ay = int(pos["y"])
-            aw = int(pos["w"])
-            ah = int(pos["h"])
+            ax, ay = self.winfo_rootx(), self.winfo_rooty()
+            aw, ah = self.winfo_width(), self.winfo_height()
+            if aw <= 1 or ah <= 1:
+                raise ValueError("winfo returned degenerate size")
         except Exception:
-            # fallback: parse live geometry string (works on desktop)
+            # fallback: parse geometry string
             try:
                 geo = self.geometry()
                 size_pos = geo.split("+")
@@ -3165,8 +3166,16 @@ class App(tk.Tk):
                 aw = int(wh[0])
                 ah = int(wh[1])
             except Exception:
-                ax, ay = self.winfo_rootx(), self.winfo_rooty()
-                aw, ah = self.winfo_width(), self.winfo_height()
+                # last resort: saved config (reliable under fullscreen games)
+                try:
+                    pos = _read_config()
+                    ax = int(pos["x"])
+                    ay = int(pos["y"])
+                    aw = int(pos["w"])
+                    ah = int(pos["h"])
+                except Exception:
+                    ax, ay = 0, 0
+                    aw, ah = self.winfo_screenwidth(), self.winfo_screenheight()
 
         # --- screen bounds: use the monitor the app lives on via ctypes ---
         # This is immune to fullscreen games hijacking winfo_screenwidth/height
@@ -5176,12 +5185,12 @@ class App(tk.Tk):
         _popup_locked_size = [pw, ph]
 
         bx, by = self._popup_pos(pw, ph)
-        popup.geometry(f"{pw}x{ph}+{bx}+{by + 10}")
+        popup.geometry(f"{pw}x{ph}+{bx}+{by}")
         def _finalize_color():
             self._color_pending = False
             if not popup.winfo_exists():
                 return
-            popup.geometry(f"{pw}x{ph}+{bx}+{by + 10}")
+            popup.geometry(f"{pw}x{ph}+{bx}+{by}")
             self._color_popup = popup
             self._raise_popup("_color_popup")
             popup.bind("<ButtonPress>", lambda e: self._raise_popup("_color_popup"))
@@ -6569,14 +6578,14 @@ class App(tk.Tk):
         pw = popup.winfo_reqwidth()
         ph = popup.winfo_reqheight()
         bx, by = self._popup_pos(pw, ph)
-        popup.geometry(f"+{bx}+{by + 20}")
+        popup.geometry(f"+{bx}+{by}")
         # Re-affirm position after tkinter finishes any pending layout passes,
         # then register and pin topmost so it stays above the main overlay
         def _finalize():
             self._settings_pending = False
             if not popup.winfo_exists():
                 return
-            popup.geometry(f"+{bx}+{by + 20}")
+            popup.geometry(f"+{bx}+{by}")
             self._settings_popup = popup
             self._raise_popup("_settings_popup")
             popup.bind("<ButtonPress>", lambda e: self._raise_popup("_settings_popup"))
