@@ -2118,10 +2118,7 @@ def _save_reopen_picker(enabled):
     try:
         os.makedirs(_APP_DIR, exist_ok=True)
         cfg = _read_config()
-        if enabled:
-            cfg["reopen_picker"] = True
-        else:
-            cfg.pop("reopen_picker", None)
+        cfg["reopen_picker"] = bool(enabled)
         with open(_CFG_PATH, "w") as _f:
             json.dump(cfg, _f, indent=2)
     except Exception as e:
