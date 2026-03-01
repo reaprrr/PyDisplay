@@ -1,0 +1,14 @@
+# Required
+psutil
+
+# Required if NVIDIA GPU is present
+pynvml
+
+# Optional — CPU clock speed & AMD/Intel GPU stats via WMI
+pywin32
+
+# Optional — minimize to system tray
+pystray
+
+# Optional — fallback GPU reader if pynvml & pywin32 both fail
+GPUtil

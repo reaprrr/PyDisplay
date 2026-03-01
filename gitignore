@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# PyDisplay runtime data (stored in %APPDATA%\PyDisplay)
+PyDisplay_pos.json
+PyDisplay_theme_*.json
+PyDisplay_log.txt
+PyDisplay_error.log
+PyDisplay_install.log
+PyDisplay_snooze.json
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
