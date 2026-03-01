@@ -8058,9 +8058,6 @@ if __name__ == "__main__":
         root.geometry(f"+{sw//2 - pw//2}+{sh//2 - ph//2}")
         root.mainloop()
 
-        # Clear the one-shot reopen flag now that picker has been shown
-        _save_reopen_picker(False)
-
         # Write chosen position to pos.json, merging any existing keys (preserve w/h)
         if _chosen:
             _write_config({"x": _chosen["x"], "y": _chosen["y"]})
