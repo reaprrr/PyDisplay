@@ -4,6 +4,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.0.6] - 2026-03-02
+
+### Added
+- **Portable Mode** — PyDisplay can now run in a fully self-contained portable configuration.
+  - Creates a `PyDisplay` folder in the chosen location.
+  - Moves the script into the new folder automatically (not copied; original file is moved).
+  - Restarts PyDisplay from the new location seamlessly.
+  - All files, logs, and config are stored inside that folder going forward — nothing written to `%APPDATA%` or elsewhere on the system.
+  - Portable mode setting correctly defaults to OFF when app is launched from desktop (even if previously enabled).
+
+### Fixed
+- **Dialog positioning bug** — Fixed three dialogs that were reading parent window geometry before it was finalized, causing misaligned positioning on startup.
+  - Update checker dialog (lines 1022-1025)
+  - Package updates dialog (lines 1239-1242)
+  - Uninstall confirmation dialog (lines 2000-2006)
+  - Root cause: Missing `root.update_idletasks()` before reading `root.winfo_width/height`
+  - Fix: Added `root.update_idletasks()` after dialog's `update_idletasks()` to ensure parent geometry is computed before centering
+  
+- **Non-atomic config file writes** — Implemented atomic write pattern to prevent config corruption on app crash or force-kill.
+  - Previously: `_write_config()` wrote directly to `PyDisplay_pos.json`, risking data loss if app crashed during JSON serialization
+  - Now: Writes to temporary file first (`PyDisplay_pos.json.tmp`), then atomically renames to target
+  - Includes cleanup logic to remove orphaned temp files on write failure
+  - Prevents loss of window position, theme, and settings on unexpected exit
+
+- **Race condition in package install dialog** — Added defensive null-check in `_click_action()` to prevent edge-case crash.
+  - Package row buttons were bound before their reference dict was populated (extremely unlikely in practice, but now bulletproof)
+  - Safety check ensures `rd_ref[0]` is set before accessing its properties
+
+- **Snooze buttons closing entire update dialog** — Fixed from previous session; snoozing a single package no longer dismisses the dialog, allowing users to handle multiple packages sequentially.
+
+### Changed
+- **Dependency page button layout** — Reordered checkbox layout for better visual hierarchy.
+  - "Don't show again" now appears first (left)
+  - "Portable Mode" now appears second (previously was first)
+  - "Reopen Choose Position" remains third
+  - Maintains consistent styling and spacing across all three options
+
+---
+
 ## [1.0.5] - 2026-03-01
 
 ### Removed
@@ -91,8 +130,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 - `HeapCompact` overflow error on 64-bit heap handles — handle array now uses `ctypes.c_void_p` to prevent `int too long to convert` crash.
-- Memory Tools dropdown geometry manager aconflict resolved (`pack` vs `grid` mismatch that caused startup crash).
-- Re-run on Memory Cleaner now correctly re-executes the full clean cycle rather thana returning instantly.
+- Memory Tools dropdown geometry manager conflict resolved (`pack` vs `grid` mismatch that caused startup crash).
+- Re-run on Memory Cleaner now correctly re-executes the full clean cycle rather than returning instantly.
 
 ---
 
