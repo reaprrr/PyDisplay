@@ -31,7 +31,7 @@ _THEME_DIR  = _APP_DIR   # themes live alongside the config
 _FONT           = "Courier New" # single source of truth for the app font
 _BASE_FONT_SIZE = 9             # default font size; all remap logic is relative to this
 _CONFIG_VERSION  = 1             # increment when config schema changes; triggers migration
-_APP_VERSION     = "1.0.4"       # increment on each release; checked against GitHub latest tag
+_APP_VERSION     = "1.0.5"       # increment on each release; checked against GitHub latest tag
 _GITHUB_REPO     = "reaprrr/PyDisplay"
 
 # Default display section order — defined once, referenced everywhere
