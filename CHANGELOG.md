@@ -41,6 +41,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - "Reopen Choose Position" remains third
   - Maintains consistent styling and spacing across all three options
 
+- **Always-on-Top setting default** — Changed from OFF to ON at startup.
+  - New users can no longer accidentally lose the overlay window behind other windows immediately after launch.
+  - Users who prefer the overlay to not be always-on-top can still disable it via Settings.
+  - Existing users' saved preference is respected (only affects first-time startup when no config exists).
+  - **Fix Details:** 
+    - Line 2988: Initial window state changed from `False` to `True`
+    - Line 3546: Config loading now uses `.get("always_on_top", True)` to apply default for missing keys
+    - Line 3676: Exception handler also uses `True` as default for fresh configs
+    - Result: Always-on-top is enabled in all scenarios (first launch, existing users with old configs, fresh installs)
+
 ---
 
 ## [1.0.5] - 2026-03-01
