@@ -395,6 +395,78 @@ def _has_nvidia_gpu():
     return False
 
 
+# ── App-wide colour palette — defined here so _run_dependency_check can use ──
+# them before psutil is imported. _load_position() overwrites these at startup
+# with the saved theme values.
+
+BG      = "#0a0a0f"
+PANEL   = "#111118"
+BORDER  = "#1e1e2e"
+ACCENT1 = "#00ffe5"
+ACCENT2 = "#ff6b35"
+ACCENT3 = "#7b30d1"
+DIM     = "#3a3a5c"
+TEXT    = "#e0e0f0"
+SUBTEXT = "#6868a0"
+RED     = "#ff3860"
+GREEN   = "#39ff7f"
+YELLOW  = "#ffcc00"
+
+
+def _pip_uninstall_pkg(pip_name, imp_name):
+    """
+    Uninstall *pip_name* and verify the import is gone.
+    Handles pynvml / GPUtil alias candidates and falls back to manual
+    file removal when pip has no dist-info record.
+    Raises RuntimeError if the package is still importable afterwards.
+    """
+    _pip_candidates = (["pynvml", "nvidia-ml-py"] if pip_name == "pynvml"
+                       else ["GPUtil", "gputil"]   if pip_name == "GPUtil"
+                       else [pip_name])
+    for _cand in _pip_candidates:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "uninstall", _cand, "-y",
+             "--disable-pip-version-check"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, creationflags=_NO_WIN)
+    importlib.invalidate_caches()
+    for _mod in list(sys.modules.keys()):
+        if _mod == imp_name or _mod.startswith(imp_name + "."):
+            sys.modules.pop(_mod, None)
+    # Manual file removal if pip didn't register it (no .dist-info)
+    if _can_import(imp_name):
+        import importlib.util as _ilu, shutil as _sh
+        _spec = _ilu.find_spec(imp_name)
+        if _spec and _spec.origin:
+            _pkg_dir = os.path.dirname(_spec.origin)
+            if os.path.basename(_pkg_dir).lower() == imp_name.lower():
+                _sh.rmtree(_pkg_dir, ignore_errors=True)
+            else:
+                os.remove(_spec.origin)
+            _sp = os.path.dirname(_pkg_dir)
+            for _e in os.listdir(_sp):
+                if _e.lower().startswith(imp_name.lower()) and (
+                        _e.endswith(".dist-info") or _e.endswith(".egg-info")):
+                    _sh.rmtree(os.path.join(_sp, _e), ignore_errors=True)
+        for _mod in list(sys.modules.keys()):
+            if _mod == imp_name or _mod.startswith(imp_name + "."):
+                sys.modules.pop(_mod, None)
+        importlib.invalidate_caches()
+    if _can_import(imp_name):
+        raise RuntimeError(
+            f"{imp_name!r} still importable — may need manual removal "
+            f"from site-packages.")
+
+
+def _pip_install_setuptools_for_gputil():
+    """Install setuptools before GPUtil so distutils is available on Python 3.12+."""
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "setuptools",
+         "--disable-pip-version-check", "--no-cache-dir"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, creationflags=_NO_WIN)
+
+
 def _run_dependency_check():
     """Pre-launch dependency manager. Returns dict with launch/skip_dep_check keys."""
 
@@ -411,15 +483,7 @@ def _run_dependency_check():
         ("GPUtil",  "GPUtil",  "GPUtil",    False,   "Backup GPU reader if pynvml & pywin32 both can't detect your GPU"),
     ]
 
-    BG      = "#0a0a0f"
-    PANEL   = "#111118"
-    BORDER  = "#1e1e2e"
-    TEXT    = "#e0e0f0"
-    SUBTEXT = "#6868a0"
-    GREEN   = "#39ff7f"
-    RED     = "#ff3860"
-    YELLOW  = "#ffcc00"
-    ACCENT  = "#00ffe5"
+    ACCENT = ACCENT1  # convenience alias for the dep-checker UI
 
     result = {"launch": False, "skip_dep_check": False, "reopen_placement": False}
 
@@ -461,90 +525,8 @@ def _run_dependency_check():
 
     _install_log = os.path.join(_APP_DIR, "PyDisplay_install.log")
 
-    def _run_pywin32_postinstall(appdata_dir, install_log):
-        """Run pywin32's post-install step. Must be called after pip installs pywin32."""
-        _post_log = []
-        _post_ok  = False
-        # CREATE_NO_WINDOW prevents a cmd console flashing/freezing on screen
-        # (uses the module-level _NO_WIN constant)
-
-        _scripts_dirs = [
-            os.path.join(os.path.dirname(sys.executable), "Scripts"),
-            os.path.join(sys.prefix, "Scripts"),
-        ]
-        try:
-            import site as _site
-            for _sp in _site.getsitepackages():
-                _scripts_dirs.append(os.path.join(os.path.dirname(_sp), "Scripts"))
-        except Exception:
-            pass
-
-        for _sdir in _scripts_dirs:
-            for _exe in ("pywin32_postinstall.exe", "pywin32_postinstall"):
-                _ep = os.path.join(_sdir, _exe)
-                if os.path.exists(_ep):
-                    _post_log.append(f"trying entry point: {_ep}")
-                    try:
-                        _pr = subprocess.run([_ep, "-install"],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            creationflags=_NO_WIN, timeout=30)
-                        _post_log.append(f"exit={_pr.returncode} stdout={_pr.stdout.strip()!r} stderr={_pr.stderr.strip()!r}")
-                        if _pr.returncode == 0:
-                            _post_ok = True
-                            break
-                    except subprocess.TimeoutExpired:
-                        _post_log.append("timed out — skipping")
-            _py = os.path.join(_sdir, "pywin32_postinstall.py")
-            if not _post_ok and os.path.exists(_py):
-                _post_log.append(f"trying script: {_py}")
-                try:
-                    _pr = subprocess.run([sys.executable, _py, "-install"],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                        creationflags=_NO_WIN, timeout=30)
-                    _post_log.append(f"exit={_pr.returncode} stdout={_pr.stdout.strip()!r} stderr={_pr.stderr.strip()!r}")
-                    if _pr.returncode == 0:
-                        _post_ok = True
-                except subprocess.TimeoutExpired:
-                    _post_log.append("timed out — skipping")
-            if _post_ok:
-                break
-
-        if not _post_ok:
-            _post_log.append("trying: python -m pywin32_postinstall -install")
-            try:
-                _pr = subprocess.run(
-                    [sys.executable, "-m", "pywin32_postinstall", "-install"],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                    creationflags=_NO_WIN, timeout=30)
-                _post_log.append(f"exit={_pr.returncode} stdout={_pr.stdout.strip()!r} stderr={_pr.stderr.strip()!r}")
-                if _pr.returncode == 0:
-                    _post_ok = True
-            except subprocess.TimeoutExpired:
-                _post_log.append("timed out — skipping")
-
-        if not _post_ok:
-            _post_log.append("trying in-process post_install()")
-            try:
-                import pywin32_postinstall as _pw32pi
-                _pw32pi.install()
-                _post_ok = True
-                _post_log.append("in-process post_install() succeeded")
-            except Exception as _pie:
-                _post_log.append(f"in-process failed: {_pie}")
-
-        try:
-            os.makedirs(appdata_dir, exist_ok=True)
-            with open(install_log, "a", encoding="utf-8") as _lf:
-                _lf.write("\n" + "─"*72 + "\n")
-                _lf.write(f"  pywin32 post-install log (ok={_post_ok}):\n")
-                for _ll in _post_log:
-                    _lf.write(f"    {_ll}\n")
-                _lf.write("─"*72 + "\n")
-        except Exception:
-            pass
-
     # row_data: list of dicts with keys: disp, pip_name, imp_name, required,
-    #           installed (live), action_var ("install"|"remove"|"keep"), widgets
+    #           installed (live), action_var ("install"|"keep"), widgets
     row_data = []
     _row_errors = {}  # pip_name → error string, for clickable "? Failed" status
 
@@ -620,9 +602,7 @@ def _run_dependency_check():
         row_bg    = PANEL if i % 2 == 0 else BG
 
         # Default queued action: keep — user must explicitly click Install
-        _initial_action = "keep"
-
-        action_var = tk.StringVar(value=_initial_action)
+        action_var = tk.StringVar(value="keep")
 
         # Col 0 — package name + required marker
         req_tag = " *" if required else ""
@@ -685,42 +665,7 @@ def _run_dependency_check():
                     root.after(0, lambda: rd_ref[0]["status_lbl"].config(text="⏳  Removing…", fg=YELLOW))
                     root.after(0, lambda: _set_progress(0.1))
                     try:
-                        _pip_candidates = (["pynvml", "nvidia-ml-py"] if pip_name_s == "pynvml"
-                                           else ["GPUtil", "gputil"] if pip_name_s == "GPUtil"
-                                           else [pip_name_s])
-                        for _cand in _pip_candidates:
-                            subprocess.run(
-                                [sys.executable, "-m", "pip", "uninstall", _cand, "-y",
-                                 "--disable-pip-version-check"],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, creationflags=_NO_WIN)
-                        importlib.invalidate_caches()
-                        for _mod in list(sys.modules.keys()):
-                            if _mod == imp_name_s or _mod.startswith(imp_name_s + "."):
-                                sys.modules.pop(_mod, None)
-                        # manual file removal if pip didn't register it
-                        if _can_import(imp_name_s):
-                            import importlib.util as _ilu, shutil as _sh
-                            _spec = _ilu.find_spec(imp_name_s)
-                            if _spec and _spec.origin:
-                                _pkg_dir = os.path.dirname(_spec.origin)
-                                if os.path.basename(_pkg_dir).lower() == imp_name_s.lower():
-                                    _sh.rmtree(_pkg_dir, ignore_errors=True)
-                                else:
-                                    os.remove(_spec.origin)
-                                _sp = os.path.dirname(_pkg_dir)
-                                for _e in os.listdir(_sp):
-                                    if _e.lower().startswith(imp_name_s.lower()) and (
-                                            _e.endswith(".dist-info") or _e.endswith(".egg-info")):
-                                        _sh.rmtree(os.path.join(_sp, _e), ignore_errors=True)
-                            for _mod in list(sys.modules.keys()):
-                                if _mod == imp_name_s or _mod.startswith(imp_name_s + "."):
-                                    sys.modules.pop(_mod, None)
-                            importlib.invalidate_caches()
-                        if _can_import(imp_name_s):
-                            raise RuntimeError(
-                                f"{imp_name_s!r} still importable — may need manual removal "
-                                f"from site-packages.")
+                        _pip_uninstall_pkg(pip_name_s, imp_name_s)
                         inst_ref[0] = False
                         root.after(0, lambda: rd_ref[0]["status_lbl"].config(
                             text="✘  removed", fg=SUBTEXT))
@@ -743,11 +688,7 @@ def _run_dependency_check():
                         # install setuptools first to provide it.
                         if pip_name_s == "GPUtil":
                             root.after(0, lambda: log_var.set("Installing setuptools for GPUtil…"))
-                            subprocess.run(
-                                [sys.executable, "-m", "pip", "install", "setuptools",
-                                 "--disable-pip-version-check", "--no-cache-dir"],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, creationflags=_NO_WIN)
+                            _pip_install_setuptools_for_gputil()
                             root.after(0, lambda: log_var.set("Installing GPUtil…"))
                         proc = subprocess.run(
                             [sys.executable, "-m", "pip", "install", pip_name_s,
@@ -1623,7 +1564,6 @@ def _run_dependency_check():
                 return
 
         to_install   = []
-        to_uninstall = []
         seen = set()
         for rd in row_data:
             disp, pip_name, imp_name = rd["disp"], rd["pip_name"], rd["imp_name"]
@@ -1632,11 +1572,8 @@ def _run_dependency_check():
             if s == "install" and pip_name not in seen:
                 to_install.append((disp, pip_name, imp_name, status_lbl, rd))
                 seen.add(pip_name)
-            elif s == "remove" and pip_name not in seen:
-                to_uninstall.append((disp, pip_name, imp_name, status_lbl, rd))
-                seen.add(pip_name)
 
-        if not to_install and not to_uninstall:
+        if not to_install:
             if launch_after:
                 result["launch"] = True
                 result["skip_dep_check"] = _dsa_var.get()
@@ -1650,7 +1587,7 @@ def _run_dependency_check():
         apply_btn.unbind("<Button-1>")
 
         # Show progress bar
-        total_ops = len(to_uninstall) + len(to_install)
+        total_ops = len(to_install)
         _done_ops = [0]
         def _advance():
             _done_ops[0] += 1
@@ -1672,91 +1609,8 @@ def _run_dependency_check():
             except Exception:
                 pass
 
-        # _run_pywin32_postinstall defined at closure scope above
-
         def _worker():
             _had_error = False
-            for disp, pip_name, imp_name, status_lbl, _rd in to_uninstall:
-                root.after(0, lambda msg=f"Removing {disp}…": log_var.set(msg))
-                root.after(0, lambda sl=status_lbl: sl.config(text="⏳  Removing…", fg=YELLOW))
-                try:
-                    # Try pip uninstall first using all known dist names
-                    _pip_candidates = ["pynvml", "nvidia-ml-py"] if pip_name == "pynvml" else [pip_name]
-                    _last_stdout = _last_err = ""
-                    for _cand in _pip_candidates:
-                        proc = subprocess.run(
-                            [sys.executable, "-m", "pip", "uninstall", _cand, "-y",
-                             "--disable-pip-version-check"],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            creationflags=_NO_WIN)
-                        _last_stdout = (proc.stdout or "").strip()
-                        _last_err    = (proc.stderr or "").strip()
-                    importlib.invalidate_caches()
-                    # Purge sys.modules cache so _can_import hits the filesystem
-                    for _mod in list(sys.modules.keys()):
-                        if _mod == imp_name or _mod.startswith(imp_name + "."):
-                            sys.modules.pop(_mod, None)
-                    # If pip didn't register it, the files may exist loose in site-packages
-                    # (no .dist-info folder) — find and delete them manually
-                    if _can_import(imp_name):
-                        import importlib.util as _ilu
-                        _spec = _ilu.find_spec(imp_name)
-                        if _spec and _spec.origin:
-                            import shutil
-                            _pkg_dir = os.path.dirname(_spec.origin)
-                            if os.path.basename(_pkg_dir).lower() == imp_name.lower():
-                                shutil.rmtree(_pkg_dir, ignore_errors=True)
-                            else:
-                                os.remove(_spec.origin)
-                            _sp = os.path.dirname(_pkg_dir)
-                            for _entry in os.listdir(_sp):
-                                if _entry.lower().startswith(imp_name.lower()) and (
-                                        _entry.endswith(".dist-info") or
-                                        _entry.endswith(".egg-info")):
-                                    shutil.rmtree(os.path.join(_sp, _entry), ignore_errors=True)
-                        for _mod in list(sys.modules.keys()):
-                            if _mod == imp_name or _mod.startswith(imp_name + "."):
-                                sys.modules.pop(_mod, None)
-                        importlib.invalidate_caches()
-                    if _can_import(imp_name):
-                        raise RuntimeError(
-                            f"Could not remove {imp_name!r} — it may be installed outside "
-                            f"the current Python environment. Try deleting it manually from "
-                            f"site-packages.")
-                    try:
-                        os.makedirs(_APP_DIR, exist_ok=True)
-                        with open(_install_log, "a", encoding="utf-8") as _lf:
-                            _lf.write("\n" + "─"*72 + "\n")
-                            _lf.write(f"  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  REMOVED {disp} ({pip_name})\n")
-                            if _last_stdout:
-                                _lf.write(f"  pip stdout: {_last_stdout}\n")
-                            _lf.write("─"*72 + "\n")
-                    except Exception:
-                        pass
-                    root.after(0, lambda sl=status_lbl: sl.config(text="✘  removed", fg=SUBTEXT))
-                    root.after(0, lambda msg=f"✔  {disp} removed.": log_var.set(msg))
-                    # Update inst_ref so button flips to "Install" immediately
-                    def _post_remove(rd=_rd):
-                        rd["inst_ref"][0] = False
-                        rd["action_var"].set("keep")
-                        rd["refresh_btn"]()
-                    root.after(0, _post_remove)
-                except Exception as exc:
-                    try:
-                        os.makedirs(_APP_DIR, exist_ok=True)
-                        with open(_install_log, "a", encoding="utf-8") as _lf:
-                            _lf.write("\n" + "─"*72 + "\n")
-                            _lf.write(f"  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  REMOVE FAILED {disp} ({pip_name})\n")
-                            _lf.write(f"  {exc}\n")
-                            _lf.write("─"*72 + "\n")
-                    except Exception:
-                        pass
-                    _had_error = True
-                    root.after(0, lambda sl=status_lbl, pn=pip_name, s=str(exc): _set_failed(sl, pn, s))
-                    root.after(0, lambda msg=f"✘  {disp} remove failed: {exc}": log_var.set(msg))
-                _advance()
-                time.sleep(0.3)
-
             for disp, pip_name, imp_name, status_lbl, _rd in to_install:
                 root.after(0, lambda msg=f"Installing {disp}…": log_var.set(msg))
                 root.after(0, lambda sl=status_lbl: sl.config(text="⏳  Installing…", fg=YELLOW))
@@ -1765,11 +1619,7 @@ def _run_dependency_check():
                     # GPUtil requires distutils (removed in Python 3.12+); install setuptools first.
                     if pip_name == "GPUtil":
                         root.after(0, lambda: log_var.set("Installing setuptools for GPUtil…"))
-                        subprocess.run(
-                            [sys.executable, "-m", "pip", "install", "setuptools",
-                             "--disable-pip-version-check", "--no-cache-dir"],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            creationflags=_NO_WIN)
+                        _pip_install_setuptools_for_gputil()
                         root.after(0, lambda: log_var.set(f"Installing {disp}…"))
                     proc = subprocess.run(
                         [sys.executable, "-m", "pip", "install", pip_name,
@@ -1784,13 +1634,12 @@ def _run_dependency_check():
                         # Skip post-install — triggers Windows DLL dialog if locked.
                         # pywin32 works after restart without it in modern pip.
                         root.after(0, lambda: log_var.set("Installing wmi…"))
-                        _wmi_proc = subprocess.run(
+                        subprocess.run(
                             [sys.executable, "-m", "pip", "install", "wmi",
                              "--disable-pip-version-check", "--no-cache-dir"],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             creationflags=_NO_WIN)
-                        if _wmi_proc.returncode != 0:
-                            pass  # wmi may fail in current process — non-fatal, works after restart
+                        # wmi may fail in current process — non-fatal, works after restart
                     importlib.invalidate_caches()
                     for _mod in list(sys.modules.keys()):
                         if _mod == imp_name or _mod.startswith(imp_name + "."):
@@ -2409,23 +2258,10 @@ def get_disk_usage():
     return results
 
 
-BG      = "#0a0a0f"
-PANEL   = "#111118"
-BORDER  = "#1e1e2e"
-ACCENT1 = "#00ffe5"
-ACCENT2 = "#ff6b35"
-ACCENT3 = "#7b30d1"
-DIM     = "#3a3a5c"
-TEXT    = "#e0e0f0"
-SUBTEXT = "#6868a0"
-RED     = "#ff3860"
-GREEN   = "#39ff7f"
-
 _last_net = psutil.net_io_counters()
 _last_net_time = time.time()
 
-_last_disk_io   = psutil.disk_io_counters()
-_last_disk      = _last_disk_io if _last_disk_io else type("_D", (), {"read_bytes": 0, "write_bytes": 0})()
+_last_disk      = psutil.disk_io_counters() or type("_D", (), {"read_bytes": 0, "write_bytes": 0})()
 _last_disk_time = time.time()
 
 # Windows click-through helpers
@@ -3853,7 +3689,6 @@ class App(tk.Tk):
 
         # ── Position popup: bottom = top of main app; stack below speedtest if open ──
         self._apply_font_size(self._font_size, root=dlg)
-        dlg.update_idletasks()
         dlg.update_idletasks()
         dw = max(dlg.winfo_reqwidth(), 280)
         dh = dlg.winfo_reqheight() + 4
