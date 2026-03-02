@@ -1,7 +1,7 @@
 # PyDisplay
 <div align="center">
 
-![PyDisplay](https://img.shields.io/badge/PyDisplay-v1.0.6-00ffe5?style=for-the-badge&labelColor=0a0a0f)
+![PyDisplay](https://img.shields.io/badge/PyDisplay-v1.0.6-00ffe5?style=flat-square&labelColor=0a0a0f)
 ![Python](https://img.shields.io/badge/Python-3.9%2B-3776ab?style=flat-square)
 ![Windows](https://img.shields.io/badge/Windows-10%2B-0078d4?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-39ff7f?style=flat-square)
