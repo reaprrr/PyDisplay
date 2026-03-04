@@ -21,8 +21,25 @@ import glob
 # Suppress console windows spawned by subprocess calls on Windows
 _NO_WIN = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
 
+# ── Portable Mode Detection ───────────────────────────────────────────────────
+# Check if we're running from inside a folder named "PyDisplay" (portable mode)
+def _detect_portable_mode():
+    """Return True if the script is in a folder named 'PyDisplay', False otherwise."""
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        folder_name = os.path.basename(script_dir)
+        return folder_name.lower() == "pydisplay"
+    except Exception:
+        return False
+
+_portable_mode_detected = _detect_portable_mode()
+
 # Config / data paths — single source of truth used everywhere
-_APP_DIR    = os.path.join(os.environ.get("APPDATA", ""), "PyDisplay")
+# If portable mode detected, use script dir; otherwise use APPDATA
+if _portable_mode_detected:
+    _APP_DIR = os.path.dirname(os.path.abspath(__file__))
+else:
+    _APP_DIR = os.path.join(os.environ.get("APPDATA", ""), "PyDisplay")
 _CFG_PATH   = os.path.join(_APP_DIR, "PyDisplay_pos.json")
 _LOG_PATH   = os.path.join(_APP_DIR, "PyDisplay_error.log")
 _DATA_LOG_PATH      = os.path.join(_APP_DIR, "PyDisplay_log.txt")
@@ -31,7 +48,7 @@ _THEME_DIR  = _APP_DIR   # themes live alongside the config
 _FONT           = "Courier New" # single source of truth for the app font
 _BASE_FONT_SIZE = 9             # default font size; all remap logic is relative to this
 _CONFIG_VERSION  = 1             # increment when config schema changes; triggers migration
-_APP_VERSION     = "1.0.5"       # increment on each release; checked against GitHub latest tag
+_APP_VERSION     = "1.0.6"       # increment on each release; checked against GitHub latest tag
 _GITHUB_REPO     = "reaprrr/PyDisplay"
 
 # Default display section order — defined once, referenced everywhere
@@ -1140,12 +1157,14 @@ def _run_dependency_check():
                 _snooze[p] = now_ts + 86400
                 _save_snooze()
                 log_var.set(f"Snoozed {d} for 1 day.")
-                dlg.destroy()
+                if dlg.winfo_exists():
+                    dlg.destroy()
             def _snooze_7d(e, p=pip_name, d=disp):
                 _snooze[p] = now_ts + 604800
                 _save_snooze()
                 log_var.set(f"Snoozed {d} for 7 days.")
-                dlg.destroy()
+                if dlg.winfo_exists():
+                    dlg.destroy()
 
             s1 = tk.Label(btn_cell, text="1d", bg=row_bg, fg=SUBTEXT,
                           font=(_FONT, _BASE_FONT_SIZE - 1), cursor="hand2", padx=4)
@@ -1428,11 +1447,64 @@ def _run_dependency_check():
     bot = tk.Frame(root, bg=BG, pady=10)
     bot.pack(fill="x", padx=16)
 
+    # Portable Mode toggle — opens the portable-mode dialog from the dep page.
+    # Note: "portable mode" is ultimately determined by the script living inside
+    # a folder named "PyDisplay"; this toggle controls/reflects the user's choice
+    # and can trigger the migration+restart flow.
+    _pm_state = {"v": _portable_mode_detected}
+
+    _pm_lbl = tk.Label(
+        bot,
+        text=("☑" if _pm_state["v"] else "☐") + "  Portable Mode",
+        bg=BG,
+        fg=(GREEN if _pm_state["v"] else SUBTEXT),
+        font=(_FONT, _BASE_FONT_SIZE - 1),
+        cursor="hand2",
+    )
+    _pm_lbl.pack(side="left")
+
+    def _pm_refresh():
+        _pm_lbl.config(
+            text=("☑" if _pm_state["v"] else "☐") + "  Portable Mode",
+            fg=(GREEN if _pm_state["v"] else SUBTEXT),
+        )
+
+    def _toggle_portable_mode(e=None):
+        # Already portable: we don't support migrating back automatically.
+        if _portable_mode_detected:
+            _pm_state["v"] = True
+            _pm_refresh()
+            return
+
+        want = not _pm_state["v"]
+        if want:
+            try:
+                chosen = _show_portable_mode_dialog(parent=root, force=True)
+            except Exception as _ex:
+                try:
+                    _log_error("_toggle_portable_mode", _ex)
+                except Exception:
+                    pass
+                chosen = False
+            _pm_state["v"] = bool(chosen)
+        else:
+            # Regular mode: just persist preference
+            _pm_state["v"] = False
+            try:
+                _write_config({"portable_mode_asked": True, "portable_mode": False})
+            except Exception:
+                pass
+        _pm_refresh()
+
+    _pm_lbl.bind("<Button-1>", _toggle_portable_mode)
+    _pm_lbl.bind("<Enter>", lambda e: _pm_lbl.config(fg=ACCENT))
+    _pm_lbl.bind("<Leave>", lambda e: _pm_lbl.config(fg=(GREEN if _pm_state["v"] else SUBTEXT)))
+
     # Don't show again checkbox on left
     _dsa_var = tk.BooleanVar(value=False)
     _chk_lbl = tk.Label(bot, text="☐  Don't show again",
                         bg=BG, fg=SUBTEXT, font=(_FONT, _BASE_FONT_SIZE - 1), cursor="hand2")
-    _chk_lbl.pack(side="left")
+    _chk_lbl.pack(side="left", padx=(12, 0))
     def _toggle_dsa(e=None):
         v = not _dsa_var.get()
         _dsa_var.set(v)
@@ -2150,7 +2222,189 @@ def _check_singleton():
     return _handle  # keep alive for the lifetime of the process
 
 
+# ── Portable Mode Migration ───────────────────────────────────────────────────
+
+def _migrate_to_portable():
+    """Create PyDisplay folder and move script into it."""
+    try:
+        original_script = os.path.abspath(__file__)
+        original_dir = os.path.dirname(original_script)
+        script_name = os.path.basename(original_script)
+        pydisplay_dir = os.path.join(original_dir, "PyDisplay")
+        os.makedirs(pydisplay_dir, exist_ok=True)
+        new_script_path = os.path.join(pydisplay_dir, script_name)
+        import shutil
+        if new_script_path != original_script:
+            shutil.move(original_script, new_script_path)
+        new_cfg_path = os.path.join(pydisplay_dir, "PyDisplay_pos.json")
+        with open(new_cfg_path, "w") as f:
+            json.dump({"portable_mode_asked": True, "portable_mode": True, "x": 100, "y": 100, "w": 320, "h": 600}, f)
+        return True, new_script_path, None
+    except Exception as e:
+        return False, None, str(e)
+
+
+def _show_portable_mode_dialog(parent=None, force=False):
+    """Show portable mode dialog with auto-migration.
+
+    - parent=None: runs as a standalone startup dialog (legacy behaviour).
+    - parent=<tk.Tk/tk.Toplevel>: opens as a modal Toplevel without starting a new mainloop.
+    - force=True: show the dialog even if it was previously answered.
+    """
+    try:
+        with open(_CFG_PATH) as f:
+            cfg = json.load(f)
+            if (not force) and ("portable_mode_asked" in cfg):
+                return _portable_mode_detected
+    except Exception:
+        pass
+    if _portable_mode_detected:
+        try:
+            os.makedirs(_APP_DIR, exist_ok=True)
+            with open(_CFG_PATH, "w") as f:
+                json.dump({"portable_mode_asked": True, "portable_mode": True}, f)
+        except Exception:
+            pass
+        return True
+    # Build dialog as either a standalone root (startup) or a modal Toplevel (in-app).
+    if parent is None:
+        dlg = tk.Tk()
+    else:
+        dlg = tk.Toplevel(parent)
+        try:
+            dlg.transient(parent)
+        except Exception:
+            pass
+    dlg.title("PyDisplay — Portable Mode?")
+    dlg.configure(bg=PANEL)
+    dlg.resizable(False, False)
+    dlg.wm_attributes("-topmost", True)
+    dlg.overrideredirect(True)
+    dlg.withdraw()
+    _result = [None]
+    _processing = [False]
+    _make_titlebar(dlg, PANEL, BORDER, SUBTEXT, RED, on_close=dlg.destroy, title_text="PyDisplay  ·  Portable Mode?", title_fg=ACCENT1, title_bg=PANEL)
+    hdr = tk.Frame(dlg, bg=BG, padx=16, pady=12)
+    hdr.pack(fill="x")
+    tk.Label(hdr, text="Would you like Portable Mode?", bg=BG, fg=ACCENT1, font=(_FONT, _BASE_FONT_SIZE, "bold")).pack(anchor="w")
+    tk.Frame(dlg, bg=BORDER, height=1).pack(fill="x", padx=12, pady=(0, 8))
+    content = tk.Frame(dlg, bg=BG, padx=16, pady=8)
+    content.pack(fill="both", expand=True)
+    msg = ("PORTABLE MODE: Script moves to a 'PyDisplay' folder.\nAll settings, themes, and logs stored alongside the script.\nPerfect for USB drives and cloud sync folders.\n\nREGULAR MODE: Everything goes to %APPDATA%\\PyDisplay\nSettings are per-Windows-user account.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nChoosing PORTABLE MODE will:\n  1. Create a 'PyDisplay' folder\n  2. Move this script into it\n  3. Restart PyDisplay from the new location\n  4. Store all files/logs/config in that folder")
+    tk.Label(content, text=msg, bg=BG, fg=TEXT, font=(_FONT, _BASE_FONT_SIZE - 1), justify="left", anchor="w").pack(fill="x")
+    tk.Frame(dlg, bg=BORDER, height=1).pack(fill="x", padx=12, pady=(8, 0))
+    status_lbl = tk.Label(dlg, text="", bg=BG, fg=GREEN, font=(_FONT, _BASE_FONT_SIZE - 2))
+    btn_row = tk.Frame(dlg, bg=BG, padx=16, pady=10)
+    btn_row.pack(fill="x")
+    def _hard_restart(new_path):
+        """Launch new_path then terminate this instance immediately.
+
+        Note: tkinter swallows SystemExit raised from callbacks, so we must use
+        os._exit to ensure the mutex is released before the relaunched instance
+        runs the singleton check.
+        """
+        # Persist the user's choice immediately (the normal write-at-end-of-dialog
+        # path won't run because we hard-exit).
+        try:
+            _write_config({"portable_mode_asked": True, "portable_mode": True})
+        except Exception:
+            pass
+
+        try:
+            subprocess.Popen([sys.executable, new_path], creationflags=_NO_WIN)
+        except Exception:
+            try:
+                subprocess.Popen([sys.executable, new_path])
+            except Exception:
+                pass
+
+        # Release singleton mutex ASAP so the new instance doesn't trip "Already running".
+        try:
+            global _singleton_mutex
+            if _singleton_mutex:
+                ctypes.windll.kernel32.CloseHandle(_singleton_mutex)
+                _singleton_mutex = None
+        except Exception:
+            pass
+
+        # Best-effort close windows before hard-exit.
+        try:
+            if parent is not None and hasattr(parent, "destroy"):
+                parent.destroy()
+        except Exception:
+            pass
+        try:
+            if dlg.winfo_exists():
+                dlg.destroy()
+        except Exception:
+            pass
+        os._exit(0)
+
+    def _portable():
+        if _processing[0]:
+            return
+        _processing[0] = True
+        _result[0] = True
+        for w in btn_row.winfo_children():
+            try:
+                w.unbind("<Button-1>")
+                w.config(cursor="arrow", fg=SUBTEXT)
+            except:
+                pass
+        status_lbl.config(text="Setting up portable mode...", fg=ACCENT1)
+        status_lbl.pack(pady=(4, 0))
+        dlg.update_idletasks()
+        success, new_path, error_msg = _migrate_to_portable()
+        if success:
+            status_lbl.config(text="✓  Setup complete. Restarting...", fg=GREEN)
+            dlg.update_idletasks()
+            dlg.after(900, lambda p=new_path: _hard_restart(p))
+        else:
+            status_lbl.config(text=f"✘  Migration failed: {error_msg or 'Unknown error'}. Using regular mode.", fg=RED)
+            _result[0] = False
+            dlg.after(3000, dlg.destroy)
+    def _regular():
+        if _processing[0]:
+            return
+        _result[0] = False
+        dlg.destroy()
+    port_btn = tk.Label(btn_row, text="✓  PORTABLE MODE", bg=BORDER, fg=ACCENT1, font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2", padx=12, pady=6)
+    port_btn.pack(side="right", padx=(8, 0))
+    port_btn.bind("<Button-1>", lambda e: _portable())
+    port_btn.bind("<Enter>", lambda e: port_btn.config(fg=GREEN) if not _processing[0] else None)
+    port_btn.bind("<Leave>", lambda e: port_btn.config(fg=ACCENT1) if not _processing[0] else None)
+    reg_btn = tk.Label(btn_row, text="REGULAR MODE", bg=BORDER, fg=SUBTEXT, font=(_FONT, _BASE_FONT_SIZE, "bold"), cursor="hand2", padx=12, pady=6)
+    reg_btn.pack(side="right")
+    reg_btn.bind("<Button-1>", lambda e: _regular())
+    reg_btn.bind("<Enter>", lambda e: reg_btn.config(fg=TEXT) if not _processing[0] else None)
+    reg_btn.bind("<Leave>", lambda e: reg_btn.config(fg=SUBTEXT) if not _processing[0] else None)
+    dlg.update_idletasks()
+    sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+    dw, dh = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+    dlg.geometry(f"{dw}x{dh}+{sw//2 - dw//2}+{sh//2 - dh//2}")
+    dlg.deiconify()
+    dlg.grab_set()
+    if parent is None:
+        dlg.mainloop()
+    else:
+        # Modal wait for Toplevel case (avoid a second Tk mainloop)
+        try:
+            parent.wait_window(dlg)
+        except Exception:
+            pass
+    try:
+        os.makedirs(_APP_DIR, exist_ok=True)
+        with open(_CFG_PATH, "w") as f:
+            json.dump({"portable_mode_asked": True, "portable_mode": _result[0] if _result[0] is not None else False}, f)
+    except Exception:
+        pass
+    return _result[0] if _result[0] is not None else False
+
+
 _singleton_mutex = _check_singleton()
+
+# Show portable mode dialog on first run
+_show_portable_mode_dialog()
 
 _dep_result = None
 try:
@@ -3106,19 +3360,27 @@ class App(tk.Tk):
             return
 
         try:
-            # Assert all popups as HWND_TOPMOST first
+            _aot = bool(self.wm_attributes("-topmost"))
+            _HWND_NOTOPMOST = -2
+            # Assert all popups as HWND_TOPMOST only if Always on Top is enabled,
+            # otherwise demote them so the stack doesn't sit above other apps.
+            _insert_after = _HWND_TOPMOST if _aot else _HWND_NOTOPMOST
             for hwnd in open_hwnds:
-                _user32.SetWindowPos(hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
+                _user32.SetWindowPos(hwnd, _insert_after, 0, 0, 0, 0,
                                      _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
             # Stack them: top popup is last in open_hwnds; work downward
             # SetWindowPos(A, B) places A immediately BELOW B
             for i in range(len(open_hwnds) - 1, 0, -1):
                 _user32.SetWindowPos(open_hwnds[i - 1], open_hwnds[i], 0, 0, 0, 0,
                                      _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
-            # Place main window below the bottom-most popup
+            # Place main window below the bottom-most popup, respecting Always on Top.
             if self._hwnd:
-                _user32.SetWindowPos(self._hwnd, open_hwnds[0], 0, 0, 0, 0,
-                                     _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
+                if _aot:
+                    _user32.SetWindowPos(self._hwnd, open_hwnds[0], 0, 0, 0, 0,
+                                         _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
+                else:
+                    _user32.SetWindowPos(self._hwnd, _HWND_NOTOPMOST, 0, 0, 0, 0,
+                                         _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
         except Exception:
             pass
 
@@ -4257,7 +4519,7 @@ class App(tk.Tk):
                                font=(_FONT, _BASE_FONT_SIZE - 2, "bold"), cursor="hand2",
                                padx=10, pady=3)
             del_btn.pack(side="left", padx=(0, 6))
-            del_btn.bind("<Enter>", lambda e: del_btn.config(bg=TEXT))
+            del_btn.bind("<Enter>", lambda e: del_btn.config(bg=BG))
             del_btn.bind("<Leave>", lambda e: del_btn.config(bg=RED))
             del_btn.bind("<Button-1>", lambda e: confirm_delete())
 
@@ -5741,7 +6003,14 @@ class App(tk.Tk):
                 try:
                     alpha = float(self.wm_attributes("-alpha"))
                     if self._hwnd:
-                        _set_click_through(self._hwnd, True, alpha)
+                        _HWND_NOTOPMOST = -2
+                        if want:
+                            _user32.SetWindowPos(self._hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
+                                                 _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
+                        else:
+                            _user32.SetWindowPos(self._hwnd, _HWND_NOTOPMOST, 0, 0, 0, 0,
+                                                 _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
+                        _set_click_through(self._hwnd, self._click_through_on, alpha)
                     for w in self.winfo_children():
                         try:
                             if isinstance(w, tk.Toplevel) and w is not popup:
@@ -5750,8 +6019,7 @@ class App(tk.Tk):
                             pass
                 except Exception:
                     pass
-                if want:
-                    self._repin_open_popups()
+                self._repin_open_popups()
             self.after(50, _reassert_alpha)
             self._save_position()
 
@@ -5994,7 +6262,7 @@ class App(tk.Tk):
 
 
     def _settings_rates(self, tog_grid, popup):
-        # ── Opacity / Poll Rate / Log Every        # ── Opacity / Poll Rate / Log Every — shared grid for column alignment ─
+        # ── Opacity / Poll Rate / Log Every ──────────────────────────────────
         sel_grid = tk.Frame(popup, bg=PANEL, padx=12, pady=2)
         sel_grid.pack(fill="x")
 
@@ -6418,6 +6686,19 @@ class App(tk.Tk):
             self._raise_popup("_settings_popup")
             popup.bind("<ButtonPress>", lambda e: self._raise_popup("_settings_popup"))
             self._pin_popup_topmost(popup)
+            def _on_popup_close(e):
+                # Re-assert main window z-order after popup closes,
+                # in case pinning the popup pulled the main window to topmost.
+                try:
+                    _aot = bool(self.wm_attributes("-topmost"))
+                    if self._hwnd:
+                        _HWND_NOTOPMOST = -2
+                        _insert_after = _HWND_TOPMOST if _aot else _HWND_NOTOPMOST
+                        _user32.SetWindowPos(self._hwnd, _insert_after, 0, 0, 0, 0,
+                                             _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
+                except Exception:
+                    pass
+            popup.bind("<Destroy>", _on_popup_close)
         popup.after(30, _finalize)
         popup.focus_set()
 
@@ -7539,8 +7820,8 @@ class App(tk.Tk):
         self.gpu_usage.set(gpu["usage"])
         self.vram_bar.max_val = gpu["vram_total"]
         self.vram_bar.set(gpu["vram_used"])
-        self.gpu_watt_lbl.config(text=f"{gpu['wattage']:.0f}W" if gpu["wattage"] else "N/A")
-        self.gpu_temp_lbl.config(text=self._fmt_temp(gpu["temp"])       if gpu["temp"]    else "N/A")
+        self.gpu_watt_lbl.config(text=f"{gpu['wattage']:.0f}W" if gpu["wattage"] is not None else "N/A")
+        self.gpu_temp_lbl.config(text=self._fmt_temp(gpu["temp"])       if gpu["temp"] is not None    else "N/A")
         if gpu["temp"] is not None:
             self._gpu_temp_min = min(self._gpu_temp_min, gpu["temp"])
             self._gpu_temp_max = max(self._gpu_temp_max, gpu["temp"])
