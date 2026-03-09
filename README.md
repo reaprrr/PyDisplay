@@ -53,7 +53,7 @@ On first launch the dependency manager will open. Install any missing packages a
 
 2. Run from the project folder:
    ```
-   pyinstaller --clean --onefile --noconsole --name PyDisplay --icon=cat_icon.ico PyDisplay.pyw
+   pyinstaller --clean --onefile --noconsole --name PyDisplay --icon=app.ico PyDisplay.pyw
    ```
 
 3. Your `.exe` will appear in the `dist/` folder.
