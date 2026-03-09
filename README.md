@@ -1,190 +1,132 @@
 # PyDisplay
-<div align="center">
-
-![PyDisplay](https://img.shields.io/badge/PyDisplay-v1.0.6-00ffe5?style=flat-square&labelColor=0a0a0f)
-![Python](https://img.shields.io/badge/Python-3.9%2B-3776ab?style=flat-square)
-![Windows](https://img.shields.io/badge/Windows-10%2B-0078d4?style=flat-square)
-![License](https://img.shields.io/badge/License-MIT-39ff7f?style=flat-square)
-
-A lightweight, infinitely customisable Windows system stats overlay. Real-time GPU, CPU, RAM, network, disk I/O & storage in a sleek always-on-top window — no browser, no Electron, no bloat.
-
-[**Features**](#features) • [**Installation**](#installation) • [**Usage**](#usage) • [**Theming**](#theming) • [**Changelog**](CHANGELOG.md)
-
-</div>
+A lightweight, customisable Windows system stats overlay built with Python and tkinter. Displays real-time GPU, CPU, RAM, network, disk I/O, and storage usage in a compact always-on-top window — no browser, no Electron, no bloat.
 
 ---
 
 ## Features
-
-### 📊 Real-Time Monitoring
-| Feature | Details |
-|---------|---------|
-| **GPU** | Usage · VRAM · Temperature · Power Draw |
-| **CPU** | Usage · Clock Speed · Processes · Threads |
-| **Memory** | Total · Used · Free · Memory Cleaner (Safe & Aggressive) |
-| **Network** | Upload · Download · Built-in Speed Test · IP Lookup |
-| **Disk I/O** | Read · Write Speeds |
-| **Storage** | Per-drive capacity & usage |
-
-### 🎨 Customisation
-- **6 built-in themes** — Dark, Light, Terminal, Ice, Sunset, Midnight
-- **Full colour picker** — Customise every element: section accents, backgrounds, text, buttons
-- **Font scaling** — Single slider resizes all text
-- **Section management** — Show, hide, collapse, reorder via drag-and-drop
-- **Layout modes** — Horizontal (side-by-side) or Vertical (stacked)
-- **Multi-GPU support** — Select your active GPU in Settings
-
-### 🛠️ Tools & Utilities
-- **Memory Cleaner**
-  - 🧹 **Safe Clean** — trims working sets, flushes caches (gaming-safe)
-  - ⚡ **Aggressive Clean** — adds standby purge & memory combining (brief stutter)
-  - Live progress logs · before/after RAM display · GB freed counter
-- **Network Tools**
-  - 🚀 **Speed Test** — native ping/download/upload (no external dependencies)
-  - 🌐 **IP Lookup** — public IP + geolocation info
-- **Dependency Manager** — auto-install, update, remove packages without leaving the app
-
-### ⚙️ Advanced Features
-- **Click-through mode** — overlay visible but passes mouse clicks to apps behind it
-- **Always-on-top** — configurable, enabled by default
-- **Minimize to tray** — optional system tray icon with live GPU% display
-- **CSV logging** — periodic snapshots of all stats to file
-- **Config versioning** — settings survive app updates
-- **Atomic file writes** — prevents config corruption on crash
-- **Portable mode** — fully self-contained, nothing written to system (optional)
-- **Auto-update checker** — GitHub release tracking
-
-### 🎯 GPU Support
-**Automatic vendor detection with fallback chain:**
-- NVIDIA → `pynvml` (primary) → `GPUtil` (fallback)
-- AMD/Intel → `pywin32` (WMI) → `psutil` (basic)
+- **Real-time stats** — GPU usage, VRAM, temp & wattage · CPU usage, clock speed, processes & threads · RAM · network up/down · disk I/O · per-drive storage
+- **Click-through mode** — overlay stays visible but passes all mouse clicks to whatever's behind it
+- **Fully themeable** — built-in dark/light/terminal/ice/sunset/midnight themes plus a full colour picker for every element
+- **Font size scaling** — resize all text from a single slider
+- **Section management** — show, hide, collapse, and reorder sections via drag-and-drop in Settings
+- **Horizontal & vertical layouts** — switch between compact side-by-side and stacked views
+- **Memory Cleaner** — built-in RAM cleaner (Safe & Aggressive modes) accessible via the Memory Tools dropdown; covers all operations from Memory Reduct v3.5.2
+- **Speed test** — built-in download/upload/ping test (no extra dependencies)
+- **IP lookup** — one-click public IP + geolocation
+- **Logging** — periodic snapshots of all stats to a local text file
+- **Minimize to tray** — optional system tray icon with live GPU % (requires `pystray`)
+- **Portable mode** — run entirely from a self-contained folder; nothing written to `%APPDATA%`
+- **Config versioning** — settings survive app updates without breaking
+- **Multi-GPU support** — select your active GPU in Settings
+- **NVIDIA · AMD · Intel Arc** — automatic vendor detection with multiple fallback backends
 
 ---
 
-## Installation
+## Download
 
-### Requirements
-**Python 3.9+** on Windows 10+
+### Standalone Executable (Recommended)
+A pre-compiled `.exe` is available for users who don't have Python installed.
 
-### Quick Start
+- **No Python required** — just download and run
+- Built with [PyInstaller](https://pyinstaller.org/) (`--onefile --noconsole`)
+- Features the custom black cat icon
+- May trigger a Windows SmartScreen warning on first launch — this is expected for unsigned executables; click **More info → Run anyway**
+
+> The `.exe` bundles all internals but still relies on the built-in dependency manager to install external packages (psutil, pynvml, etc.) on first launch, same as the Python version.
+
+### From Source (Python)
 ```bash
 git clone https://github.com/reaprrr/PyDisplay.git
 cd PyDisplay
 python PyDisplay.pyw
 ```
+On first launch the dependency manager will open. Install any missing packages and hit **LAUNCH**.
 
-On first launch the **Dependency Manager** opens automatically. Select which packages to install and click **LAUNCH**.
+---
 
-### Optional Dependencies
-| Package | Purpose | Install if... |
-|---------|---------|---------------|
-| `psutil` | **REQUIRED** · CPU, RAM, disk, network | Always installed |
-| `pynvml` | NVIDIA GPU stats | You have an NVIDIA GPU |
-| `pywin32` | CPU clock speed, AMD/Intel GPU via WMI | You want advanced CPU/GPU data |
-| `pystray` | System tray integration | You want minimize-to-tray |
-| `GPUtil` | GPU fallback reader | Primary GPU reader fails |
+## Building the Executable Yourself
+
+1. Install PyInstaller:
+   ```
+   pip install pyinstaller
+   ```
+
+2. Run from the project folder:
+   ```
+   pyinstaller --clean --onefile --noconsole --name PyDisplay --icon=cat_icon.ico PyDisplay.pyw
+   ```
+
+3. Your `.exe` will appear in the `dist/` folder.
+
+> **Icon not showing?** Delete `build/`, `dist/`, `__pycache__`, and `PyDisplay.spec`, then rebuild. Windows may also cache the old icon — moving the `.exe` to a new folder forces a refresh.
+
+---
+
+## Requirements
+**Python 3.9+** on Windows (source version only).
+
+| Package | Required | Purpose |
+|---------|----------|---------|
+| `psutil` | ✅ Yes | CPU, RAM, disk & network stats |
+| `pynvml` | ✅ If NVIDIA GPU | NVIDIA GPU usage, VRAM, temp & wattage |
+| `pywin32` | Optional | CPU clock speed · AMD/Intel GPU stats via WMI |
+| `pystray` | Optional | Minimize to system tray |
+| `GPUtil` | Optional | Fallback GPU reader if pynvml & pywin32 both fail |
+
+> PyDisplay includes a built-in dependency manager that handles installation automatically on first launch.
 
 ---
 
 ## Usage
+- **Drag** the top bar to move the overlay
+- **Resize** from any edge or corner
+- **Ctrl + hover** to show tooltips while click-through is active
+- **Ctrl + click** a section header to collapse / expand it
+- **Settings (⚙)** — toggle features, change theme, reorder sections, adjust poll rate
+- **Theme (◈)** — open the colour picker to customise every section accent, background, and text colour; one **Dropdown Tools** swatch controls all tool buttons across every dropdown at once
+- **HELP? (?)** — opens the Quick Reference panel listing every button, section, and shortcut
+- **Minimize** — closes to tray if `pystray` is installed, otherwise hides
 
-### Controls
-| Action | Result |
-|--------|--------|
-| **Drag** top bar | Move overlay |
-| **Resize** edges/corners | Resize window |
-| **Ctrl + hover** | Show tooltips (click-through mode) |
-| **Ctrl + click** section header | Collapse/expand section |
-| **Wheel scroll** | Scroll section list |
+### Network Tools
+Click **▶ TOOLS** in the Network section to expand:
+- **▶ SPEED TEST** — native ping/download/upload test, no browser needed
+- **⌖ IP LOOKUP** — fetches your public IP and geolocation info
 
-### Buttons & Menus
-
-#### Main Bar (Top)
-| Button | Purpose |
-|--------|---------|
-| **⚙ SETTINGS** | Toggle features, change theme, reorder sections, adjust poll rate |
-| **◈ THEME** | Open colour picker · customise every element · one **Dropdown Tools** swatch controls all tool buttons |
-| **? HELP** | Quick Reference panel (buttons, shortcuts, tooltips) |
-| **−** | Minimize to tray (if `pystray` installed) |
-| **×** | Close |
-
-#### Dropdowns
-**▶ TOOLS** buttons expand to reveal utility menus:
-
-**Memory Tools**
-```
-🧹 MEMORY CLEAN  → Safe Clean | Aggressive Clean | Re-run
-```
-
-**Network Tools**
-```
-🚀 SPEED TEST    → Measures ping, download, upload
-⌖ IP LOOKUP     → Fetches public IP + location
-```
-
-### Settings Panel
-- **Always-on-Top** — keep overlay above all windows
-- **Click-Through** — passes clicks to apps behind overlay
-- **Lock Position** — prevent accidental movement
-- **Tray Mode** — minimize to system tray (requires `pystray`)
-- **Poll Rate** — update frequency (50ms–5s)
-- **Log Interval** — CSV logging period (off, 5s, 10s, 30s, 1m, 5m)
-- **Temp Unit** — Celsius or Fahrenheit
-- **Section Visibility** — show/hide GPU, CPU, Memory, Network, Disk, Storage
-- **Section Order** — drag-and-drop reorder
-- **Export/Import** — backup and share settings
+### Memory Tools
+Click **▶ TOOLS** in the Memory section to expand:
+- **🧹 MEMORY CLEAN** — opens the Memory Cleaner popup
+  - **Safe Clean** — trims process working sets, flushes modified pages & file system/registry caches; safe for games and browsers
+  - **Aggressive Clean** — all Safe steps plus standby list purge and memory page combination (may cause a brief stutter)
+  - Live step-by-step output log with before/after RAM usage and GB freed
 
 ---
 
-## Theming
+## Portable Mode
+PyDisplay can run in a fully self-contained portable configuration — nothing is written to `%APPDATA%` or anywhere outside the folder.
 
-### Quick Themes
-Open **◈ THEME** and select from:
-- 🌑 **Dark** (default) — sleek dark background
-- ☀️ **Light** — light background, readable in bright rooms
-- 💻 **Terminal** — monochrome, hacker aesthetic
-- ❄️ **Ice** — cool blues and cyans
-- 🌅 **Sunset** — warm oranges and purples
-- 🌙 **Midnight** — deep blues with bright accents
-
-### Custom Themes
-Click the **colour picker button (◈)** to:
-- Adjust **Background**, **Panel**, **Border**, **Text** base colours
-- Customise **Section Accents** (GPU, CPU, Memory, Network, Disk, Storage)
-- Control **Dropdown Tools** button colour (applies to all tool buttons)
-- Save/load themes by name
-- Import/export as JSON
-
-### Colour Swatches
-One click opens a full-screen colour picker with hex input, live preview, and save.
+To enable portable mode, place `PyDisplay.pyw` (or `PyDisplay.exe`) inside a folder named **`PyDisplay`**. PyDisplay detects this automatically on launch and stores all config, themes, and logs alongside the executable in that folder.
 
 ---
 
 ## Dependency Manager
+On first launch PyDisplay opens a dependency setup page where you can install, update, and manage all required packages without leaving the app.
 
-Accessible on app startup or via **⚙ Settings → Dependencies**.
-
-| Action | Behaviour |
-|--------|-----------|
-| **⌕ Update** | Check GitHub for new PyDisplay release |
-| **↻ Check Dep Updates** | Check PyPI for newer versions of installed packages |
-| **✕ Uninstall All** | Remove all deps with confirmation · post-removal verification |
-| **Check for Duplicates** | Scan for packages installed in multiple locations |
-| **? Failed** | Click a failed status label to see exact error message |
+- **⌕ Update** — checks GitHub for a new PyDisplay release
+- **↻ Check Dep Updates** — checks PyPI for newer versions of installed packages
+- **✕ Uninstall All** — removes all installed dependencies with a confirmation prompt and post-removal verification
+- **Check for Duplicates** — scans for packages installed in multiple locations and lets you clean them up
+- Package status labels show `? Failed` when an operation fails — click the label to see the exact error
 
 ---
 
 ## Data & Config
-
-All files stored in:
-- **Portable mode**: `<PyDisplay folder>/` (if enabled)
-- **Standard mode**: `%APPDATA%\PyDisplay\`
+All config and logs are stored in `%APPDATA%\PyDisplay\` (or the app folder in portable mode):
 
 | File | Contents |
 |------|----------|
-| `PyDisplay_pos.json` | Window position, size, settings, active theme |
+| `PyDisplay_pos.json` | Window position, settings, active theme |
 | `PyDisplay_theme_Default.json` | Default theme (auto-created) |
-| `PyDisplay_theme_*.json` | Custom saved themes |
+| `PyDisplay_theme_*.json` | Any saved custom themes |
 | `PyDisplay_log.txt` | Periodic stats snapshots (if logging enabled) |
 | `PyDisplay_install.log` | Dependency install/remove history |
 | `PyDisplay_error.log` | Non-fatal error log |
@@ -192,86 +134,9 @@ All files stored in:
 ---
 
 ## Changelog
-See [CHANGELOG.md](CHANGELOG.md) for full release history and detailed improvements.
-
-### Latest (v1.0.6)
-- ✨ **Portable Mode** — fully self-contained configuration option
-- 🐛 **Fixed** dialog positioning, atomic config writes, race conditions
-- 📋 **Always-on-Top** now enabled by default
-- 🎨 **Improved** button layout on dependency page
-
----
-
-## Troubleshooting
-
-### App won't start
-- Ensure Python 3.9+ is installed
-- Run `python PyDisplay.pyw` from command line to see error messages
-
-### GPU not detected
-- NVIDIA: Install `pynvml` via Dependency Manager
-- AMD/Intel: Install `pywin32` for WMI support; falls back to `psutil` (basic) if unavailable
-
-### Memory Cleaner not working
-- Right-click `PyDisplay.pyw` → Run as administrator
-- Memory Cleaner requires elevated privileges
-
-### Tray mode not available
-- Install `pystray`: Dependency Manager will prompt or run `pip install pystray`
-
-### Config/logs not saving
-- Check `%APPDATA%\PyDisplay\` has write permissions
-- Or enable Portable Mode to store everything in the script folder
-
----
-
-## Performance
-
-Designed to be lightweight:
-- **CPU**: <1% idle, <3% with speed test
-- **RAM**: ~80–120 MB
-- **GPU**: Minimal impact (vendor libs do the heavy lifting)
-
-Adjust **Poll Rate** in Settings to reduce CPU usage on slower systems.
-
----
-
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl + Hover` | Show tooltips (click-through mode only) |
-| `Ctrl + Click` (section header) | Collapse/expand section |
-| `Drag` (top bar) | Move overlay |
-| `Drag` (edges/corners) | Resize |
-
----
-
-## Development
-
-### Project Structure
-```
-PyDisplay/
-├── PyDisplay.pyw          # Main app (single-file)
-├── README.md              # This file
-├── CHANGELOG.md           # Version history
-└── .gitignore             # Git ignore rules
-```
-
-### Contributing
-Found a bug? Have an idea? [Open an issue](https://github.com/reaprrr/PyDisplay/issues) or submit a pull request.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 ---
 
 ## License
-MIT License — see LICENSE file for details.
-
----
-
-<div align="center">
-
-**[⬆ back to top](#pydisplay)**
-
-Made with ❤️ for Windows power users.
-
-</div>
+MIT

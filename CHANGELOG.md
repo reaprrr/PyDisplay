@@ -4,52 +4,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.0.7] - 2026-03-08
+
+### Added
+- **Standalone `.exe` release** — PyDisplay is now distributed as a pre-compiled Windows executable built with [PyInstaller](https://pyinstaller.org/) (`--onefile --noconsole`). No Python installation required to run.
+  - Bundles all internals into a single file for easy distribution.
+  - The built-in dependency manager still handles external packages (psutil, pynvml, etc.) on first launch as normal.
+  - May trigger a Windows SmartScreen warning on first run — expected behaviour for unsigned executables.
+- **Custom application icon** — PyDisplay now ships with a custom black cat head `.ico` icon (`cat_icon.ico`), embedded into the `.exe` and visible in File Explorer, the taskbar, and the Alt+Tab switcher.
+  - Icon includes all standard sizes: 16×16, 32×32, 48×48, 128×128, 256×256.
+
+### Fixed
+- **Ctrl key interfering with game inputs** — `_poll_ctrl` previously called `_set_click_through` (which calls `SetWindowLong`) on every 50ms tick regardless of whether the Ctrl state had changed. While the app held the overlay on screen, this caused a continuous stream of Win32 window style messages that disrupted games reading Ctrl via `GetAsyncKeyState` or raw input. Now tracks `_last_ctrl_held` and only calls `_set_click_through` on actual state transitions (press and release), reducing calls from ~20/s to at most 2 per Ctrl press.
+- **Title bar drag occasionally triggering resize** — `_get_edge` used a 20px top margin for corner resize detection, but the title bar is 28px tall. Clicking near the top-left or top-right corners of the title bar would return `"nw"` or `"ne"` instead of `None`, causing the first drag motion to resize the window instead of move it. Added an early `y < 28` guard that always returns `None` for clicks inside the title bar row.
+
+---
+
 ## [1.0.6] - 2026-03-02
 
 ### Added
 - **Portable Mode** — PyDisplay can now run in a fully self-contained portable configuration.
   - Creates a `PyDisplay` folder in the chosen location.
-  - Moves the script into the new folder automatically (not copied; original file is moved).
+  - Moves the script into the new folder automatically.
   - Restarts PyDisplay from the new location seamlessly.
   - All files, logs, and config are stored inside that folder going forward — nothing written to `%APPDATA%` or elsewhere on the system.
-  - Portable mode setting correctly defaults to OFF when app is launched from desktop (even if previously enabled).
-
-### Fixed
-- **Dialog positioning bug** — Fixed three dialogs that were reading parent window geometry before it was finalized, causing misaligned positioning on startup.
-  - Update checker dialog (lines 1022-1025)
-  - Package updates dialog (lines 1239-1242)
-  - Uninstall confirmation dialog (lines 2000-2006)
-  - Root cause: Missing `root.update_idletasks()` before reading `root.winfo_width/height`
-  - Fix: Added `root.update_idletasks()` after dialog's `update_idletasks()` to ensure parent geometry is computed before centering
-  
-- **Non-atomic config file writes** — Implemented atomic write pattern to prevent config corruption on app crash or force-kill.
-  - Previously: `_write_config()` wrote directly to `PyDisplay_pos.json`, risking data loss if app crashed during JSON serialization
-  - Now: Writes to temporary file first (`PyDisplay_pos.json.tmp`), then atomically renames to target
-  - Includes cleanup logic to remove orphaned temp files on write failure
-  - Prevents loss of window position, theme, and settings on unexpected exit
-
-- **Race condition in package install dialog** — Added defensive null-check in `_click_action()` to prevent edge-case crash.
-  - Package row buttons were bound before their reference dict was populated (extremely unlikely in practice, but now bulletproof)
-  - Safety check ensures `rd_ref[0]` is set before accessing its properties
-
-- **Snooze buttons closing entire update dialog** — Fixed from previous session; snoozing a single package no longer dismisses the dialog, allowing users to handle multiple packages sequentially.
-
-### Changed
-- **Dependency page button layout** — Reordered checkbox layout for better visual hierarchy.
-  - "Don't show again" now appears first (left)
-  - "Portable Mode" now appears second (previously was first)
-  - "Reopen Choose Position" remains third
-  - Maintains consistent styling and spacing across all three options
-
-- **Always-on-Top setting default** — Changed from OFF to ON at startup.
-  - New users can no longer accidentally lose the overlay window behind other windows immediately after launch.
-  - Users who prefer the overlay to not be always-on-top can still disable it via Settings.
-  - Existing users' saved preference is respected (only affects first-time startup when no config exists).
-  - **Fix Details:** 
-    - Line 2988: Initial window state changed from `False` to `True`
-    - Line 3546: Config loading now uses `.get("always_on_top", True)` to apply default for missing keys
-    - Line 3676: Exception handler also uses `True` as default for fresh configs
-    - Result: Always-on-top is enabled in all scenarios (first launch, existing users with old configs, fresh installs)
 
 ---
 

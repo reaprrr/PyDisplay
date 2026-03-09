@@ -48,7 +48,7 @@ _THEME_DIR  = _APP_DIR   # themes live alongside the config
 _FONT           = "Courier New" # single source of truth for the app font
 _BASE_FONT_SIZE = 9             # default font size; all remap logic is relative to this
 _CONFIG_VERSION  = 1             # increment when config schema changes; triggers migration
-_APP_VERSION     = "1.0.6"       # increment on each release; checked against GitHub latest tag
+_APP_VERSION     = "1.0.7"       # increment on each release; checked against GitHub latest tag
 _GITHUB_REPO     = "reaprrr/PyDisplay"
 
 # Default display section order — defined once, referenced everywhere
@@ -3023,6 +3023,7 @@ class App(tk.Tk):
         self._minimize_to_tray = False  # minimize to tray instead of close
         self._tray_show_gpu    = False  # show GPU % in tray tooltip when minimized
         self._tooltips_enabled = True   # show hover tooltips (gated by ctrl/click-through)
+        self._last_ctrl_held   = None   # tracks previous Ctrl state — avoids redundant SetWindowLong calls
         self._ram_peak_pct    = 0.0
         self._net_peak_down   = 0.0
         self._net_peak_up     = 0.0
@@ -3389,13 +3390,14 @@ class App(tk.Tk):
         try:
             VK_CONTROL = 0x11
             ctrl_held = bool(_user32.GetAsyncKeyState(VK_CONTROL) & 0x8000)
-            if self._hwnd:
+            if self._hwnd and ctrl_held != self._last_ctrl_held:
+                # Only call SetWindowLong when state actually changes —
+                # calling it every tick interferes with games holding Ctrl
+                self._last_ctrl_held = ctrl_held
                 alpha = float(self.wm_attributes("-alpha"))
                 if self._click_through_on:
-                    # Normal mode: click-through unless CTRL is held
                     _set_click_through(self._hwnd, not ctrl_held, alpha)
                 else:
-                    # Click-through disabled: always interactive
                     _set_click_through(self._hwnd, False, alpha)
         except Exception:
             pass
@@ -3417,10 +3419,14 @@ class App(tk.Tk):
         w = self.winfo_width()
         h = self.winfo_height()
         m = 20  # corner margin px
-        top    = y < m
+        _TITLE_H = 28  # title bar height — never treat this row as a resize edge
+        top    = y < m and y >= _TITLE_H  # exclude title bar from top-edge resize
         bottom = y > h - m
         left   = x < m
         right  = x > w - m
+        # If click is inside the title bar, it's always a move, never a resize
+        if y < _TITLE_H:
+            return None
         if top    and left:  return "nw"
         if top    and right: return "ne"
         if bottom and left:  return "sw"
