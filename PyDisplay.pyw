@@ -15,6 +15,67 @@ import socket
 import ctypes
 import glob
 
+# ── distutils.version shim (removed in Python 3.12+, needed by GPUtil) ───────
+# Inject before anything else so GPUtil imports succeed in frozen EXEs too.
+def _inject_distutils_shim():
+    if "distutils.version" not in sys.modules:
+        import types as _t
+        _injected = False
+        try:
+            import setuptools  # noqa — activates shim on 3.12+
+            import distutils.version
+            _injected = True
+        except Exception:
+            pass
+        if not _injected:
+            if "distutils" not in sys.modules:
+                sys.modules["distutils"] = _t.ModuleType("distutils")
+            # distutils.version
+            _dv = _t.ModuleType("distutils.version")
+            try:
+                from packaging.version import Version
+                _dv.LooseVersion = Version
+                _dv.StrictVersion = Version
+            except Exception:
+                class _FallbackVersion:
+                    def __init__(self, v=""): self.vstring = str(v)
+                    def __str__(self): return self.vstring
+                    def __repr__(self): return f"Version('{self.vstring}')"
+                    def __lt__(self, o): return self.vstring < str(o)
+                    def __le__(self, o): return self.vstring <= str(o)
+                    def __eq__(self, o): return self.vstring == str(o)
+                    def __ge__(self, o): return self.vstring >= str(o)
+                    def __gt__(self, o): return self.vstring > str(o)
+                _dv.LooseVersion = _FallbackVersion
+                _dv.StrictVersion = _FallbackVersion
+            sys.modules["distutils.version"] = _dv
+            sys.modules["distutils"].version = _dv
+            # distutils.spawn
+            _ds = _t.ModuleType("distutils.spawn")
+            import shutil as _shutil
+            _ds.find_executable = _shutil.which
+            _ds.spawn = lambda cmd, **kw: None
+            sys.modules["distutils.spawn"] = _ds
+            sys.modules["distutils"].spawn = _ds
+            # distutils.util
+            _du = _t.ModuleType("distutils.util")
+            _du.strtobool = lambda v: 1 if str(v).lower() in ("y","yes","t","true","on","1") else 0
+            sys.modules["distutils.util"] = _du
+            sys.modules["distutils"].util = _du
+            # distutils.errors
+            _de = _t.ModuleType("distutils.errors")
+            for _en in ("DistutilsError","DistutilsModuleError","DistutilsClassError",
+                        "DistutilsGetoptError","DistutilsArgError","DistutilsFileError",
+                        "DistutilsOptionError","DistutilsSetupError","DistutilsPlatformError",
+                        "DistutilsExecError","DistutilsInternalError","DistutilsTemplateError",
+                        "DistutilsByteCompileError","CCompilerError","CompileError",
+                        "PreprocessError","LinkError","LibError","UnknownFileError"):
+                setattr(_de, _en, type(_en, (Exception,), {}))
+            sys.modules["distutils.errors"] = _de
+            sys.modules["distutils"].errors = _de
+
+_inject_distutils_shim()
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ── App-wide constants ────────────────────────────────────────────────────────
 
@@ -303,7 +364,7 @@ def _can_import(imp_name):
                 sys.modules.pop(key, None)
         importlib.invalidate_caches()
         # GPUtil uses distutils.version which was removed in Python 3.12+.
-        # Inject the setuptools shim so the import check succeeds when setuptools is installed.
+        # Inject a manual shim so the import check succeeds in both live and frozen EXE contexts.
         if name == "GPUtil":
             for key in list(sys.modules.keys()):
                 if key == "distutils" or key.startswith("distutils."):
@@ -314,10 +375,60 @@ def _can_import(imp_name):
                 import distutils.version
             except Exception:
                 pass
+            # If distutils.version is still missing (frozen EXE / Python 3.12+),
+            # inject a minimal shim so GPUtil's top-level import doesn't crash.
+            if "distutils" not in sys.modules or "distutils.version" not in sys.modules:
+                import types
+                if "distutils" not in sys.modules:
+                    sys.modules["distutils"] = types.ModuleType("distutils")
+                # distutils.version shim
+                _dv = types.ModuleType("distutils.version")
+                try:
+                    from packaging.version import Version
+                    _dv.LooseVersion = Version
+                    _dv.StrictVersion = Version
+                except Exception:
+                    class _FallbackVersion:
+                        def __init__(self, v=""): self.vstring = str(v)
+                        def __str__(self): return self.vstring
+                        def __repr__(self): return f"Version('{self.vstring}')"
+                        def __lt__(self, o): return self.vstring < str(o)
+                        def __le__(self, o): return self.vstring <= str(o)
+                        def __eq__(self, o): return self.vstring == str(o)
+                        def __ge__(self, o): return self.vstring >= str(o)
+                        def __gt__(self, o): return self.vstring > str(o)
+                    _dv.LooseVersion = _FallbackVersion
+                    _dv.StrictVersion = _FallbackVersion
+                sys.modules["distutils.version"] = _dv
+                sys.modules["distutils"].version = _dv
+                # distutils.spawn shim
+                _ds = types.ModuleType("distutils.spawn")
+                import shutil as _shutil
+                _ds.find_executable = _shutil.which
+                _ds.spawn = lambda cmd, **kw: None
+                sys.modules["distutils.spawn"] = _ds
+                sys.modules["distutils"].spawn = _ds
+                # distutils.util shim
+                _du = types.ModuleType("distutils.util")
+                _du.strtobool = lambda v: 1 if str(v).lower() in ("y","yes","t","true","on","1") else 0
+                sys.modules["distutils.util"] = _du
+                sys.modules["distutils"].util = _du
+                # distutils.errors shim
+                _de = types.ModuleType("distutils.errors")
+                for _en in ("DistutilsError","DistutilsModuleError","DistutilsClassError",
+                            "DistutilsGetoptError","DistutilsArgError","DistutilsFileError",
+                            "DistutilsOptionError","DistutilsSetupError","DistutilsPlatformError",
+                            "DistutilsExecError","DistutilsInternalError","DistutilsTemplateError",
+                            "DistutilsByteCompileError","CCompilerError","CompileError",
+                            "PreprocessError","LinkError","LibError","UnknownFileError"):
+                    setattr(_de, _en, type(_en, (Exception,), {}))
+                sys.modules["distutils.errors"] = _de
+                sys.modules["distutils"].errors = _de
         try:
             importlib.import_module(name)
             return True
-        except ImportError:
+        except Exception as _e:
+            _log_error(f"_can_import({name})", _e)
             continue
     return False
 
@@ -766,6 +877,21 @@ def _run_dependency_check():
                                 import distutils.version  # should now resolve via setuptools
                             except Exception:
                                 pass
+                            if "distutils.version" not in sys.modules:
+                                import types as _types
+                                if "distutils" not in sys.modules:
+                                    sys.modules["distutils"] = _types.ModuleType("distutils")
+                                _dv2 = _types.ModuleType("distutils.version")
+                                try:
+                                    from packaging.version import Version as _V
+                                    _dv2.LooseVersion = _V; _dv2.StrictVersion = _V
+                                except Exception:
+                                    class _FV:
+                                        def __init__(self, v=""): self.vstring = str(v)
+                                        def __str__(self): return self.vstring
+                                    _dv2.LooseVersion = _FV; _dv2.StrictVersion = _FV
+                                sys.modules["distutils.version"] = _dv2
+                                sys.modules["distutils"].version = _dv2
                         # pywin32 DLLs can't be loaded in the current process after
                         # install — verify via metadata only, skip live import check.
                         if pip_name_s == "pywin32":
@@ -1747,6 +1873,21 @@ def _run_dependency_check():
                             import distutils.version
                         except Exception:
                             pass
+                        if "distutils.version" not in sys.modules:
+                            import types as _types
+                            if "distutils" not in sys.modules:
+                                sys.modules["distutils"] = _types.ModuleType("distutils")
+                            _dv3 = _types.ModuleType("distutils.version")
+                            try:
+                                from packaging.version import Version as _V
+                                _dv3.LooseVersion = _V; _dv3.StrictVersion = _V
+                            except Exception:
+                                class _FV:
+                                    def __init__(self, v=""): self.vstring = str(v)
+                                    def __str__(self): return self.vstring
+                                _dv3.LooseVersion = _FV; _dv3.StrictVersion = _FV
+                            sys.modules["distutils.version"] = _dv3
+                            sys.modules["distutils"].version = _dv3
                     _import_err = None
                     if pip_name == "pywin32":
                         # pywin32 DLLs can't load in current process — skip import check
