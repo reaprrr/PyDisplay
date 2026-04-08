@@ -93,7 +93,7 @@ Click **▶ TOOLS** in the Network section to expand:
 - **⌖ IP LOOKUP** — fetches your public IP and geolocation info
 
 ### Memory Tools
-Click **▶ TOOLS** in the Memory section to expand:
+Click **TOOLS** in the Memory section to expand:
 - **🧹 MEMORY CLEAN** — opens the Memory Cleaner popup
   - **Safe Clean** — trims process working sets, flushes modified pages & file system/registry caches; safe for games and browsers
   - **Aggressive Clean** — all Safe steps plus standby list purge and memory page combination (may cause a brief stutter)
