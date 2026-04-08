@@ -89,8 +89,8 @@ On first launch the dependency manager will open. Install any missing packages a
 
 ### Network Tools
 Click **TOOLS** in the Network section to expand:
-- **▶ SPEED TEST** — native ping/download/upload test, no browser needed
-- **⌖ IP LOOKUP** — fetches your public IP and geolocation info
+- **SPEED TEST** — native ping/download/upload test, no browser needed
+- **IP LOOKUP** — fetches your public IP and geolocation info
 
 ### Memory Tools
 Click **TOOLS** in the Memory section to expand:
