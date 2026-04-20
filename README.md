@@ -10,7 +10,7 @@ A lightweight, customisable Windows system stats overlay built with Python and t
 - **Font size scaling** — resize all text from a single slider
 - **Section management** — show, hide, collapse, and reorder sections via drag-and-drop in Settings
 - **Horizontal & vertical layouts** — switch between compact side-by-side and stacked views
-- **Memory Cleaner** — built-in RAM cleaner (Safe & Aggressive modes) accessible via the Memory Tools dropdown; covers all operations from Memory Reduct v3.5.2
+- **Memory Cleaner** — built-in RAM cleaner (Safe & Aggressive modes) accessible via the Memory Tools dropdown; covers all operations from Memory Reduct v3.5.2 and more
 - **Speed test** — built-in download/upload/ping test (no extra dependencies)
 - **IP lookup** — one-click public IP + geolocation
 - **Logging** — periodic snapshots of all stats to a local text file
@@ -51,14 +51,14 @@ On first launch the dependency manager will open. Install any missing packages a
    pip install pyinstaller
    ```
 
-2. Run from the project folder:
+2. Run from the project folder using the included spec file:
    ```
-   pyinstaller --clean --onefile --noconsole --name PyDisplay --icon=app.ico PyDisplay.pyw
+   pyinstaller --noconfirm PyDisplay.spec
    ```
 
 3. Your `.exe` will appear in the `dist/` folder.
 
-> **Icon not showing?** Delete `build/`, `dist/`, `__pycache__`, and `PyDisplay.spec`, then rebuild. Windows may also cache the old icon — moving the `.exe` to a new folder forces a refresh.
+> **Icon not showing?** Delete `build/`, `dist/`, and `__pycache__`, then rebuild. Windows may also cache the old icon — moving the `.exe` to a new folder forces a refresh.
 
 ---
 
@@ -88,15 +88,15 @@ On first launch the dependency manager will open. Install any missing packages a
 - **Minimize** — closes to tray if `pystray` is installed, otherwise hides
 
 ### Network Tools
-Click **TOOLS** in the Network section to expand:
-- **SPEED TEST** — native ping/download/upload test, no browser needed
-- **IP LOOKUP** — fetches your public IP and geolocation info
+Click **▶ TOOLS** in the Network section to expand:
+- **▶ SPEED TEST** — native ping/download/upload test, no browser needed
+- **⌖ IP LOOKUP** — fetches your public IP and geolocation info
 
 ### Memory Tools
-Click **TOOLS** in the Memory section to expand:
+Click **▶ TOOLS** in the Memory section to expand:
 - **🧹 MEMORY CLEAN** — opens the Memory Cleaner popup
-  - **Safe Clean** — trims process working sets, flushes modified pages & file system/registry caches; safe for games and browsers
-  - **Aggressive Clean** — all Safe steps plus standby list purge and memory page combination (may cause a brief stutter)
+  - **Safe Clean** — trims process working sets, flushes modified pages & file system/registry caches, signals a low-memory event, compacts process heaps, flushes DNS cache, and clears the clipboard; safe for games and browsers
+  - **Aggressive Clean** — all Safe steps, plus standby list purge (low-priority then full), a second modified-page flush, a second memory-page combine pass, a Python GC cycle, own-process working set trim, and a final heap compaction (may cause a brief stutter on first run)
   - Live step-by-step output log with before/after RAM usage and GB freed
 
 ---
